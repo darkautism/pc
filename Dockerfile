@@ -8,13 +8,13 @@ RUN cargo build --release --locked
 
 FROM debian:bookworm-slim
 
-RUN apt-get update \\
-    && apt-get install -y --no-install-recommends \\
-        ca-certificates \\
-        curl \\
-        git \\
-        openssh-client \\
-    && rm -rf /var/lib/apt/lists/* \\
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates \
+        curl \
+        git \
+        openssh-client \
+    && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app/data /workspace
 
 COPY --from=builder /src/target/release/pc /usr/local/bin/pc

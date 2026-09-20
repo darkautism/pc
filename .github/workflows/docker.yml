@@ -98,10 +98,10 @@ jobs:
           SHA: ${{ github.sha }}
         run: |
           set -eu
-          docker buildx imagetools create \\
-            -t "ghcr.io/darkautism/pc:latest" \\
-            -t "ghcr.io/darkautism/pc:sha-$SHA" \\
-            "ghcr.io/darkautism/pc:sha-$SHA-amd64" \\
+          docker buildx imagetools create \
+            -t "ghcr.io/darkautism/pc:latest" \
+            -t "ghcr.io/darkautism/pc:sha-$SHA" \
+            "ghcr.io/darkautism/pc:sha-$SHA-amd64" \
             "ghcr.io/darkautism/pc:sha-$SHA-arm64"
 
       - name: Verify manifest architectures
