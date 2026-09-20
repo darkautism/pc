@@ -122,7 +122,7 @@ impl PcMcp {
 
     #[tool(
         name = "read",
-        description = "Read the contents of a file. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
+        description = "Read the contents of a file. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
     )]
     async fn read(
         &self,
@@ -173,7 +173,7 @@ impl PcMcp {
 
     #[tool(
         name = "write",
-        description = "Write content to a file. Creates the file if it doesn't exist, overwrites if it does. Automatically creates parent directories."
+        description = "Write content to a file. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Creates the file if it doesn't exist, overwrites if it does, and automatically creates parent directories."
     )]
     async fn write(
         &self,
@@ -193,7 +193,7 @@ impl PcMcp {
 
     #[tool(
         name = "edit",
-        description = "Make precise file edits with exact text replacement, including multiple disjoint edits in one call. Each edits[].oldText must match exactly once in the original file."
+        description = "Make precise file edits with exact text replacement, including multiple disjoint edits in one call. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Each edits[].oldText must match exactly once in the original file."
     )]
     async fn edit(
         &self,
@@ -264,11 +264,11 @@ impl PcMcp {
     }
 
     async fn start_command(&self, command: String) -> Result<CallToolResult, McpError> {
-        let log_path = self
-            .state
-            .workspace
-            .join(".pc/tasks")
-            .join(format!("{}.log", Uuid::new_v4()));
+        let log_dir = std::env::temp_dir().join("pc").join("tasks");
+        tokio::fs::create_dir_all(&log_dir)
+            .await
+            .map_err(|e| tool_error(format!("create command log directory: {e}")))?;
+        let log_path = log_dir.join(format!("{}.log", Uuid::new_v4()));
 
         let stdout_file = OpenOptions::new()
             .create(true)
@@ -368,16 +368,11 @@ impl PcMcp {
             pid: entry.pid,
             exit_code: state.exit_code,
             output,
-            full_output_path: truncated.then_some(full_path),
+            full_output_path: Some(full_path),
             truncated,
             instruction: None,
         };
 
-        if state.exit_code.unwrap_or(1) != 0 {
-            let serialized =
-                serde_json::to_string_pretty(&result).map_err(|e| tool_error(e.to_string()))?;
-            return Err(tool_error(serialized));
-        }
         json_result(&result)
     }
 }
@@ -388,7 +383,7 @@ impl ServerHandler for PcMcp {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
-                "pc exposes exactly four coding tools: read, write, edit, and bash. read/write/edit intentionally follow Pi-style schemas. bash is deliberately different: never spend more than 10 seconds synchronously waiting for a command. When bash returns status=running, continue useful independent work and attach the returned pid later. Do not busy-loop by immediately reattaching. bash is non-interactive; pipes/redirection are supported, curses/TTY programs are not. Large bash output is truncated to a bounded tail and the full log path is returned.".to_string(),
+                "pc exposes exactly four coding tools: read, write, edit, and bash. read/write/edit intentionally follow Pi-style schemas. Relative file paths use the configured working directory, while absolute paths are not workspace-contained and may access anything allowed by the server OS user. bash is deliberately different: never spend more than 10 seconds synchronously waiting for a command. When bash returns status=running, continue useful independent work and attach the returned pid later. Do not busy-loop by immediately reattaching. bash is non-interactive; pipes/redirection are supported, curses/TTY programs are not. Every bash invocation writes combined stdout/stderr to a system-temp log and returns its absolute path; visible output is a bounded tail.".to_string(),
             )
     }
 }
@@ -466,7 +461,7 @@ mod tests {
     #[tokio::test]
     async fn long_bash_detaches_then_attaches_same_pid() {
         let workspace = std::env::temp_dir().join(format!("pc-bash-test-{}", Uuid::new_v4()));
-        tokio::fs::create_dir_all(workspace.join(".pc/tasks"))
+        tokio::fs::create_dir_all(&workspace)
             .await
             .expect("create test workspace");
 

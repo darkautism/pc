@@ -100,7 +100,6 @@ async fn main() -> anyhow::Result<()> {
     let workspace = tokio::fs::canonicalize(&args.workspace)
         .await
         .with_context(|| format!("canonicalize workspace {}", args.workspace.display()))?;
-    tokio::fs::create_dir_all(workspace.join(".pc/tasks")).await?;
 
     let connect_options = SqliteConnectOptions::from_str(&args.database_url)
         .context("parse sqlite URL")?
