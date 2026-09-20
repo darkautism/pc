@@ -1,0 +1,117 @@
+name: Docker
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  amd64:
+    name: Docker / amd64
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build amd64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ghcr.io/darkautism/pc:sha-${{ github.sha }}-amd64
+          labels: |
+            org.opencontainers.image.source=https://github.com/darkautism/pc
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=pc-amd64
+          cache-to: type=gha,mode=max,scope=pc-amd64
+          provenance: false
+          sbom: false
+
+  arm64:
+    name: Docker / arm64
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Build arm64
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ghcr.io/darkautism/pc:sha-${{ github.sha }}-arm64
+          labels: |
+            org.opencontainers.image.source=https://github.com/darkautism/pc
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=pc-arm64
+          cache-to: type=gha,mode=max,scope=pc-arm64
+          provenance: false
+          sbom: false
+
+  manifest:
+    name: Publish multi-arch manifest
+    if: github.event_name != 'pull_request'
+    needs: [amd64, arm64]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+
+      - name: Publish manifest
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          docker buildx imagetools create \\
+            -t "ghcr.io/darkautism/pc:latest" \\
+            -t "ghcr.io/darkautism/pc:sha-$SHA" \\
+            "ghcr.io/darkautism/pc:sha-$SHA-amd64" \\
+            "ghcr.io/darkautism/pc:sha-$SHA-arm64"
+
+      - name: Verify manifest architectures
+        env:
+          SHA: ${{ github.sha }}
+        run: |
+          set -eu
+          raw="$(docker buildx imagetools inspect --raw "ghcr.io/darkautism/pc:sha-$SHA")"
+          printf '%s' "$raw" | jq -e '
+            [.manifests[].platform | select(.os == "linux") | .architecture] as $arches
+            | ($arches | index("amd64")) != null
+              and ($arches | index("arm64")) != null
+          ' >/dev/null

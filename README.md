@@ -52,3 +52,17 @@ cargo run
 ```
 
 For public deployment, set `PC_PRODUCTION=true`, `PC_PUBLIC_URL=https://...`, and `PC_ALLOWED_REDIRECT_HOSTS`.
+
+## Docker
+
+The image uses `/workspace` as the coding workspace and `/app/data` for the OAuth SQLite database.
+
+```bash
+docker run --rm -p 8787:8787 \
+  -v "$PWD:/workspace" \
+  -v pc-data:/app/data \
+  -e PC_OAUTH_PASSWORD='a-long-password' \
+  ghcr.io/darkautism/pc:latest
+```
+
+GitHub Actions builds `linux/amd64` and `linux/arm64` on native runners in parallel. Pull requests build both architectures without pushing. Pushes to `main` publish architecture-specific SHA images first, then create `ghcr.io/darkautism/pc:latest` and `ghcr.io/darkautism/pc:sha-<commit>` multi-architecture manifests.
