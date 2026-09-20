@@ -17,7 +17,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock};
 use uuid::Uuid;
 
-use crate::AppState;
+use crate::{AppState, config::SecurityMode};
 
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_OUTPUT_LINES: usize = 2000;
@@ -31,6 +31,7 @@ pub struct ProcessRegistry {
 struct ProcessEntry {
     pid: u32,
     log_path: PathBuf,
+    visible_log_path: String,
     state: RwLock<ProcessState>,
     notify: Notify,
 }
@@ -129,9 +130,25 @@ impl PcMcp {
         Parameters(input): Parameters<ReadParams>,
     ) -> Result<CallToolResult, McpError> {
         let path = resolve_path(&self.state.workspace, &input.path);
-        let bytes = tokio::fs::read(&path)
-            .await
-            .map_err(|e| tool_error(format!("read {}: {e}", input.path)))?;
+        let bytes = match self.state.security.mode {
+            SecurityMode::Safe => self
+                .state
+                .sandbox
+                .as_ref()
+                .ok_or_else(|| tool_error("safe sandbox is not running"))?
+                .read_file(&input.path)
+                .await
+                .map_err(|e| tool_error(e.to_string()))?,
+            SecurityMode::Full => tokio::fs::read(&path)
+                .await
+                .map_err(|e| tool_error(format!("read {}: {e}", input.path)))?,
+            SecurityMode::Readonly => {
+                ensure_secret_access(&path, self.state.security.protect_secrets)?;
+                tokio::fs::read(&path)
+                    .await
+                    .map_err(|e| tool_error(format!("read {}: {e}", input.path)))?
+            }
+        };
         let text = String::from_utf8(bytes)
             .map_err(|_| tool_error(format!("{} is not a UTF-8 text file", input.path)))?;
 
@@ -179,15 +196,31 @@ impl PcMcp {
         &self,
         Parameters(input): Parameters<WriteParams>,
     ) -> Result<CallToolResult, McpError> {
-        let path = resolve_path(&self.state.workspace, &input.path);
-        if let Some(parent) = path.parent() {
-            tokio::fs::create_dir_all(parent)
-                .await
-                .map_err(|e| tool_error(format!("create parent directory: {e}")))?;
+        if self.state.security.mode == SecurityMode::Readonly {
+            return Err(tool_error("write is disabled in readonly mode"));
         }
-        tokio::fs::write(&path, input.content)
-            .await
-            .map_err(|e| tool_error(format!("write {}: {e}", input.path)))?;
+        let path = resolve_path(&self.state.workspace, &input.path);
+        match self.state.security.mode {
+            SecurityMode::Safe => self
+                .state
+                .sandbox
+                .as_ref()
+                .ok_or_else(|| tool_error("safe sandbox is not running"))?
+                .write_file(&input.path, input.content.as_bytes())
+                .await
+                .map_err(|e| tool_error(e.to_string()))?,
+            SecurityMode::Full => {
+                if let Some(parent) = path.parent() {
+                    tokio::fs::create_dir_all(parent)
+                        .await
+                        .map_err(|e| tool_error(format!("create parent directory: {e}")))?;
+                }
+                tokio::fs::write(&path, input.content)
+                    .await
+                    .map_err(|e| tool_error(format!("write {}: {e}", input.path)))?;
+            }
+            SecurityMode::Readonly => unreachable!(),
+        }
         Ok(text_result(format!("Successfully wrote to {}", input.path)))
     }
 
@@ -199,13 +232,31 @@ impl PcMcp {
         &self,
         Parameters(input): Parameters<EditParams>,
     ) -> Result<CallToolResult, McpError> {
+        if self.state.security.mode == SecurityMode::Readonly {
+            return Err(tool_error("edit is disabled in readonly mode"));
+        }
         if input.edits.is_empty() {
             return Err(tool_error("edits must not be empty"));
         }
         let path = resolve_path(&self.state.workspace, &input.path);
-        let original = tokio::fs::read_to_string(&path)
-            .await
-            .map_err(|e| tool_error(format!("read {}: {e}", input.path)))?;
+        let original = match self.state.security.mode {
+            SecurityMode::Safe => {
+                let bytes = self
+                    .state
+                    .sandbox
+                    .as_ref()
+                    .ok_or_else(|| tool_error("safe sandbox is not running"))?
+                    .read_file(&input.path)
+                    .await
+                    .map_err(|e| tool_error(e.to_string()))?;
+                String::from_utf8(bytes)
+                    .map_err(|_| tool_error(format!("{} is not a UTF-8 text file", input.path)))?
+            }
+            SecurityMode::Full => tokio::fs::read_to_string(&path)
+                .await
+                .map_err(|e| tool_error(format!("read {}: {e}", input.path)))?,
+            SecurityMode::Readonly => unreachable!(),
+        };
 
         let mut replacements = Vec::with_capacity(input.edits.len());
         for edit in &input.edits {
@@ -238,9 +289,20 @@ impl PcMcp {
             updated.replace_range(start..end, &new_text);
         }
 
-        tokio::fs::write(&path, updated)
-            .await
-            .map_err(|e| tool_error(format!("write {}: {e}", input.path)))?;
+        match self.state.security.mode {
+            SecurityMode::Safe => self
+                .state
+                .sandbox
+                .as_ref()
+                .ok_or_else(|| tool_error("safe sandbox is not running"))?
+                .write_file(&input.path, updated.as_bytes())
+                .await
+                .map_err(|e| tool_error(e.to_string()))?,
+            SecurityMode::Full => tokio::fs::write(&path, updated)
+                .await
+                .map_err(|e| tool_error(format!("write {}: {e}", input.path)))?,
+            SecurityMode::Readonly => unreachable!(),
+        }
         Ok(text_result(format!(
             "Successfully applied {} edit(s) to {}",
             input.edits.len(),
@@ -256,6 +318,9 @@ impl PcMcp {
         &self,
         Parameters(input): Parameters<BashParams>,
     ) -> Result<CallToolResult, McpError> {
+        if self.state.security.mode == SecurityMode::Readonly {
+            return Err(tool_error("bash is disabled in readonly mode"));
+        }
         match (input.command, input.pid) {
             (Some(command), None) => self.start_command(command).await,
             (None, Some(pid)) => self.attach_process(pid).await,
@@ -264,11 +329,22 @@ impl PcMcp {
     }
 
     async fn start_command(&self, command: String) -> Result<CallToolResult, McpError> {
-        let log_dir = std::env::temp_dir().join("pc").join("tasks");
+        let (log_dir, visible_log_dir) = if let Some(sandbox) = self.state.sandbox.as_ref() {
+            let dir = sandbox.temp_dir().join("pc").join("tasks");
+            (dir.clone(), dir)
+        } else {
+            let dir = std::env::temp_dir().join("pc").join("tasks");
+            (dir.clone(), dir)
+        };
         tokio::fs::create_dir_all(&log_dir)
             .await
             .map_err(|e| tool_error(format!("create command log directory: {e}")))?;
-        let log_path = log_dir.join(format!("{}.log", Uuid::new_v4()));
+        let file_name = format!("{}.log", Uuid::new_v4());
+        let log_path = log_dir.join(&file_name);
+        let visible_log_path = visible_log_dir
+            .join(file_name)
+            .to_string_lossy()
+            .to_string();
 
         let stdout_file = OpenOptions::new()
             .create(true)
@@ -279,10 +355,19 @@ impl PcMcp {
             .try_clone()
             .map_err(|e| tool_error(format!("clone command log: {e}")))?;
 
-        let mut child = tokio::process::Command::new("bash")
-            .arg("-lc")
-            .arg(command)
-            .current_dir(&self.state.workspace)
+        let mut child = if let Some(sandbox) = self.state.sandbox.as_ref() {
+            sandbox
+                .bash_command(&command)
+                .map_err(|e| tool_error(format!("prepare sandbox bash: {e}")))?
+        } else {
+            let mut command_process = tokio::process::Command::new("bash");
+            command_process
+                .arg("-lc")
+                .arg(command)
+                .current_dir(&self.state.workspace);
+            command_process
+        };
+        let mut child = child
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))
@@ -295,6 +380,7 @@ impl PcMcp {
         let entry = Arc::new(ProcessEntry {
             pid,
             log_path,
+            visible_log_path,
             state: RwLock::new(ProcessState {
                 finished: false,
                 exit_code: None,
@@ -346,7 +432,7 @@ impl PcMcp {
     async fn process_result(&self, entry: &Arc<ProcessEntry>) -> Result<CallToolResult, McpError> {
         let state = *entry.state.read().await;
         let (output, truncated) = bounded_tail(&entry.log_path).await?;
-        let full_path = entry.log_path.to_string_lossy().to_string();
+        let full_path = entry.visible_log_path.clone();
 
         if !state.finished {
             let result = BashResult {
@@ -383,7 +469,7 @@ impl ServerHandler for PcMcp {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
-                "pc exposes exactly four coding tools: read, write, edit, and bash. read/write/edit intentionally follow Pi-style schemas. Relative file paths use the configured working directory, while absolute paths are not workspace-contained and may access anything allowed by the server OS user. bash is deliberately different: never spend more than 10 seconds synchronously waiting for a command. When bash returns status=running, continue useful independent work and attach the returned pid later. Do not busy-loop by immediately reattaching. bash is non-interactive; pipes/redirection are supported, curses/TTY programs are not. Every bash invocation writes combined stdout/stderr to a system-temp log and returns its absolute path; visible output is a bounded tail.".to_string(),
+                format!("pc exposes exactly four coding tools: read, write, edit, and bash. Security mode is {:?}. In full mode, paths and bash use the host directly under OS permissions. In safe mode, each tool command self-reexecs through an embedded rootless Linux sandbox: Landlock when fully available, otherwise a rootless user/mount namespace allowlist, plus no-new-privileges and a seccomp denylist. Only the workspace, pc temp/home, required runtime paths, and optional explicit credential paths are visible. In readonly mode, write/edit/bash are disabled. bash never spends more than 10 seconds synchronously waiting for a command; when status=running, continue useful independent work and attach the returned pid later. Pipes/redirection are supported; curses/TTY programs are not. Every bash invocation writes combined stdout/stderr to a readable temp log.", self.state.security.mode),
             )
     }
 }
@@ -394,6 +480,36 @@ async fn finish_entry(entry: &Arc<ProcessEntry>, exit_code: Option<i32>) {
     state.exit_code = exit_code;
     drop(state);
     entry.notify.notify_waiters();
+}
+
+fn ensure_secret_access(path: &Path, protect_secrets: bool) -> Result<(), McpError> {
+    if !protect_secrets {
+        return Ok(());
+    }
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return Ok(());
+    };
+    let protected = [
+        home.join(".ssh"),
+        home.join(".aws"),
+        home.join(".config/gh"),
+        home.join(".config/gcloud"),
+        home.join(".git-credentials"),
+        home.join(".netrc"),
+        home.join(".npmrc"),
+        home.join(".docker/config.json"),
+        home.join(".kube/config"),
+    ];
+    if protected
+        .iter()
+        .any(|secret| path == secret || path.starts_with(secret))
+    {
+        return Err(tool_error(format!(
+            "access to {} is blocked by protect_secrets",
+            path.display()
+        )));
+    }
+    Ok(())
 }
 
 fn resolve_path(workspace: &Path, raw: &str) -> PathBuf {
@@ -470,6 +586,8 @@ mod tests {
             public_url: None,
             oauth_password: None,
             workspace: workspace.clone(),
+            security: crate::config::SecurityConfig::default(),
+            sandbox: None,
             allowed_redirect_hosts: Vec::new(),
             production: false,
             processes: ProcessRegistry::default(),

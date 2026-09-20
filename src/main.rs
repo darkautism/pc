@@ -11,9 +11,13 @@ use tower_http::trace::TraceLayer;
 use tracing::info;
 use url::Url;
 
+mod config;
 mod oauth;
+mod sandbox;
 mod tools;
 
+use config::{PcConfig, SecurityConfig, SecurityMode};
+use sandbox::SafeSandbox;
 use tools::{PcMcp, ProcessRegistry};
 
 #[derive(Parser, Debug)]
@@ -34,8 +38,11 @@ struct Args {
     #[arg(long, env = "PC_OAUTH_PASSWORD")]
     oauth_password: Option<String>,
 
-    #[arg(long, env = "PC_WORKSPACE", default_value = ".")]
-    workspace: PathBuf,
+    #[arg(long, env = "PC_HOME", default_value = ".")]
+    home: PathBuf,
+
+    #[arg(long, env = "PC_WORKSPACE")]
+    workspace: Option<PathBuf>,
 
     #[arg(long, env = "PC_ALLOWED_REDIRECT_HOSTS", default_value = "")]
     allowed_redirect_hosts: String,
@@ -49,18 +56,35 @@ pub(crate) struct AppState {
     pub public_url: Option<String>,
     pub oauth_password: Option<String>,
     pub workspace: PathBuf,
+    pub security: SecurityConfig,
+    pub sandbox: Option<Arc<SafeSandbox>>,
     pub allowed_redirect_hosts: Vec<String>,
     pub production: bool,
     pub processes: ProcessRegistry,
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+fn main() -> anyhow::Result<()> {
+    // Safe-mode commands re-exec this binary and must enter the rootless sandbox
+    // before Tokio creates worker threads, matching LazyTeam's mini-sandbox design.
+    if let Some(result) = sandbox::maybe_handle_entrypoint() {
+        return result;
+    }
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(async_main())
+}
+
+async fn async_main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .init();
 
     let args = Args::parse();
+    let PcConfig {
+        workspace,
+        security,
+    } = config::load_or_create(&args.home, args.workspace.clone()).await?;
     let public_url = args
         .public_url
         .as_deref()
@@ -97,9 +121,25 @@ async fn main() -> anyhow::Result<()> {
         tokio::fs::create_dir_all("data").await?;
     }
 
-    let workspace = tokio::fs::canonicalize(&args.workspace)
+    let home = tokio::fs::canonicalize(&args.home)
         .await
-        .with_context(|| format!("canonicalize workspace {}", args.workspace.display()))?;
+        .with_context(|| format!("canonicalize PC_HOME {}", args.home.display()))?;
+    let workspace = tokio::fs::canonicalize(&workspace)
+        .await
+        .with_context(|| format!("canonicalize workspace {}", workspace.display()))?;
+    let sandbox = if security.mode == SecurityMode::Safe {
+        Some(Arc::new(
+            SafeSandbox::start(
+                &workspace,
+                &home.join("tmp"),
+                security.network,
+                security.protect_secrets,
+            )
+            .await?,
+        ))
+    } else {
+        None
+    };
 
     let connect_options = SqliteConnectOptions::from_str(&args.database_url)
         .context("parse sqlite URL")?
@@ -118,6 +158,8 @@ async fn main() -> anyhow::Result<()> {
         public_url,
         oauth_password: args.oauth_password,
         workspace,
+        security,
+        sandbox,
         allowed_redirect_hosts,
         production: args.production,
         processes: ProcessRegistry::default(),
@@ -153,10 +195,10 @@ async fn main() -> anyhow::Result<()> {
         .merge(mcp_router)
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(TraceLayer::new_for_http())
-        .with_state(state);
+        .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    info!(listen = %args.listen, workspace = %args.workspace.display(), "pc listening");
+    info!(listen = %args.listen, workspace = %state.workspace.display(), security_mode = ?state.security.mode, "pc listening");
     axum::serve(listener, app).await?;
     Ok(())
 }

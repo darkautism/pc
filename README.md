@@ -31,6 +31,27 @@ stdout and stderr are combined into a server-side log file from process start, s
 
 bash is non-interactive. Pipes and redirection are supported; PTY/curses programs such as `vim`, `less`, `top`, and interactive REPLs are not.
 
+## Security
+
+pc deliberately keeps security configuration to four settings in `PC_HOME/config.yaml`:
+
+```yaml
+workspace: /path/to/project
+security:
+  mode: safe
+  network: true
+  protect_secrets: true
+```
+
+- `workspace`: host project directory and default working directory.
+- `security.mode`: `full`, `safe`, or `readonly`.
+- `security.network`: whether the safe sandbox has network access.
+- `security.protect_secrets`: hides common host credential locations in `safe` and `readonly`; `full` deliberately means full host access.
+
+`full` keeps Pi-like host access: relative paths start at `workspace`, absolute paths are allowed subject to OS permissions. `safe` uses the embedded rootless mini-sandbox derived from LazyTeam: Landlock when fully supported, otherwise a rootless user/mount namespace allowlist, plus no-new-privileges, dropped capabilities, and a seccomp denylist. It has no Docker/Podman runtime dependency. `readonly` allows reads while rejecting write, edit, and bash.
+
+`PC_WORKSPACE` remains available as a deployment override for `workspace`. If `config.yaml` does not exist, pc creates it on startup.
+
 ## OAuth
 
 The OAuth implementation is ported from LazyTeam and includes:
