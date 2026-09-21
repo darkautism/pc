@@ -1,0 +1,30 @@
+name: Windows
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: windows-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Windows / x86_64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Upload pc.exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc-windows-x86_64
+          path: target/release/pc.exe
+          if-no-files-found: error
