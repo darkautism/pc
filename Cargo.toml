@@ -10,7 +10,7 @@ axum = "0.8"
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde", "clock"] }
 clap = { version = "4", features = ["derive", "env"] }
-oauth = { git = "https://github.com/darkautism/oauth.git", rev = "86bd4c96ca9ab826869aa2b711ef117881e8b61c" }
+oauth = { git = "https://github.com/darkautism/oauth.git", rev = "07c7f8a8cc2e0e1fdf343355590b60990d502657" }
 rmcp = { version = "3.4", features = ["server", "transport-streamable-http-server"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

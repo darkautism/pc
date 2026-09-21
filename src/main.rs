@@ -201,22 +201,27 @@ async fn async_main() -> anyhow::Result<()> {
         processes: ProcessRegistry::default(),
     });
 
-    let oauth_state = Arc::new(OAuthState::new(
-        state.db.clone(),
-        OAuthConfig {
-            service_name: "pc".into(),
-            scope: "pc".into(),
-            public_url: state.public_url.clone(),
-            oauth_password: state.oauth_password.clone(),
-            default_host: "127.0.0.1:8686".into(),
-            token_prefixes: TokenPrefixes::new("pc"),
-            redirect_policy: RedirectPolicy::Restricted {
-                production: state.production,
-                allowed_hosts: state.allowed_redirect_hosts.clone(),
+    let oauth_state = Arc::new(
+        OAuthState::open_migrating_legacy(
+            home.join("oauth.db"),
+            OAuthConfig {
+                service_name: "pc".into(),
+                scope: "pc".into(),
+                public_url: state.public_url.clone(),
+                oauth_password: state.oauth_password.clone(),
+                default_host: "127.0.0.1:8686".into(),
+                token_prefixes: TokenPrefixes::new("pc"),
+                redirect_policy: RedirectPolicy::Restricted {
+                    production: state.production,
+                    allowed_hosts: state.allowed_redirect_hosts.clone(),
+                },
+                client_id_metadata_document_supported: false,
             },
-            client_id_metadata_document_supported: false,
-        },
-    ));
+            &state.db,
+        )
+        .await
+        .context("open OAuth database")?,
+    );
 
     let mcp_config = mcp_http_config(state.public_url.as_deref())?;
     let root_mcp_config = mcp_http_config(state.public_url.as_deref())?;
