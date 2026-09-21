@@ -226,7 +226,8 @@ async fn async_main() -> anyhow::Result<()> {
             oauth_state.clone(),
             oauth::require_mcp_auth,
         ))
-        .route_layer(middleware::from_fn(normalize_chatgpt_action_scan));
+        .route_layer(middleware::from_fn(normalize_chatgpt_action_scan))
+        .route_layer(middleware::from_fn(mcp_streamable_response_headers));
 
     let app = Router::new()
         .merge(oauth::router(oauth_state.clone()))
@@ -247,6 +248,22 @@ async fn async_main() -> anyhow::Result<()> {
     );
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn mcp_streamable_response_headers(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    let is_event_stream = response
+        .headers()
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"));
+    if is_event_stream {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            header::HeaderValue::from_static("no-cache, no-transform"),
+        );
+    }
+    response
 }
 
 async fn normalize_chatgpt_action_scan(request: Request, next: Next) -> Response {
@@ -397,12 +414,12 @@ fn mcp_http_config(public_url: Option<&str>) -> anyhow::Result<StreamableHttpSer
     }
     Ok(StreamableHttpServerConfig::default()
         .with_allowed_hosts(allowed_hosts)
-        // Match the ChatGPT-compatible MCPX transport: keep requests stateless,
-        // but do not require per-request protocol metadata on ordinary tools/list.
-        // ChatGPT's automatic action scan sends a plain tools/list after discovery.
+        // Match MCPX's ChatGPT-facing transport exactly: stateless Streamable
+        // HTTP with the default SSE response mode. In particular, do not force
+        // application/json for POST responses; MCPX leaves JSONResponse disabled.
         .with_legacy_session_mode(false)
         .with_stateless_protocol_metadata_required(false)
-        .with_json_response(true))
+        .with_json_response(false))
 }
 
 #[cfg(test)]
@@ -417,6 +434,10 @@ mod tests {
         assert!(
             !config.stateless_protocol_metadata_required,
             "automatic ChatGPT tools/list must not require per-request _meta"
+        );
+        assert!(
+            !config.json_response,
+            "MCPX-compatible ChatGPT discovery uses Streamable HTTP SSE responses"
         );
     }
 
@@ -446,7 +467,8 @@ mod tests {
         );
         let app = Router::new()
             .route_service("/mcp", service)
-            .route_layer(middleware::from_fn(normalize_chatgpt_action_scan));
+            .route_layer(middleware::from_fn(normalize_chatgpt_action_scan))
+            .route_layer(middleware::from_fn(mcp_streamable_response_headers));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind");
@@ -460,6 +482,18 @@ mod tests {
         assert!(
             discover_response.starts_with("HTTP/1.1 200"),
             "discover failed: {discover_response}"
+        );
+        assert!(
+            discover_response
+                .to_ascii_lowercase()
+                .contains("content-type: text/event-stream"),
+            "discover must use MCPX-compatible SSE response mode: {discover_response}"
+        );
+        assert!(
+            discover_response
+                .to_ascii_lowercase()
+                .contains("cache-control: no-cache, no-transform"),
+            "discover must preserve Streamable HTTP no-transform semantics: {discover_response}"
         );
         assert!(
             discover_response.contains("2026-07-28"),
@@ -481,6 +515,12 @@ mod tests {
         assert!(
             list_response.starts_with("HTTP/1.1 200"),
             "automatic tools/list failed: {list_response}"
+        );
+        assert!(
+            list_response
+                .to_ascii_lowercase()
+                .contains("content-type: text/event-stream"),
+            "tools/list must use MCPX-compatible SSE response mode: {list_response}"
         );
         for tool in ["read", "write", "edit", "bash"] {
             assert!(
