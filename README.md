@@ -21,7 +21,7 @@ If the command is still running after 10 seconds, pc does **not** kill it. It re
 
 `bash({ pid })` attaches to that same process and also waits for at most 10 seconds. stdout and stderr are combined into a log file from process start. Tool-visible output is limited to the last 2000 lines or 50 KiB; the complete log remains readable with `read` or normal shell tools.
 
-bash is non-interactive. Pipes and redirection are supported; PTY/curses programs such as `vim`, `less`, `top`, and interactive REPLs are not.
+`bash` is a non-interactive shell tool: it uses Bash on Unix and `cmd.exe` on Windows. Pipes and redirection follow the native shell; PTY/curses programs and interactive REPLs are not supported.
 
 ## Native / manual install
 

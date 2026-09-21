@@ -312,7 +312,7 @@ impl PcMcp {
 
     #[tool(
         name = "bash",
-        description = "Execute a non-interactive bash command in the configured workspace, or attach to a PID returned by a prior call. A command is synchronously awaited for at most 10 seconds. If still running, it is NOT killed: the tool returns its PID and asks you to do other independent work before attaching later. Attach also waits at most 10 seconds. stdout/stderr are combined; visible output is limited to the last 2000 lines or 50KB, with full output stored in the returned log path. Pipes and redirection are supported; interactive TTY/curses programs are not."
+        description = "Execute a non-interactive shell command in the configured workspace, or attach to a PID returned by a prior call. Unix uses bash; Windows uses cmd.exe. A command is synchronously awaited for at most 10 seconds. If still running, it is NOT killed: the tool returns its PID and asks you to do other independent work before attaching later. Attach also waits at most 10 seconds. stdout/stderr are combined; visible output is limited to the last 2000 lines or 50KB, with full output stored in the returned log path. Pipes and redirection are supported; interactive TTY/curses programs are not."
     )]
     async fn bash(
         &self,
@@ -358,21 +358,16 @@ impl PcMcp {
         let mut child = if let Some(sandbox) = self.state.sandbox.as_ref() {
             sandbox
                 .bash_command(&command)
-                .map_err(|e| tool_error(format!("prepare sandbox bash: {e}")))?
+                .map_err(|e| tool_error(format!("prepare sandbox shell: {e}")))?
         } else {
-            let mut command_process = tokio::process::Command::new("bash");
-            command_process
-                .arg("-lc")
-                .arg(command)
-                .current_dir(&self.state.workspace);
-            command_process
+            native_shell_command(&command, &self.state.workspace)
         };
         let mut child = child
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout_file))
             .stderr(Stdio::from(stderr_file))
             .spawn()
-            .map_err(|e| tool_error(format!("spawn bash: {e}")))?;
+            .map_err(|e| tool_error(format!("spawn shell: {e}")))?;
 
         let pid = child
             .id()
@@ -480,6 +475,25 @@ async fn finish_entry(entry: &Arc<ProcessEntry>, exit_code: Option<i32>) {
     state.exit_code = exit_code;
     drop(state);
     entry.notify.notify_waiters();
+}
+
+#[cfg(windows)]
+fn native_shell_command(command: &str, workspace: &Path) -> tokio::process::Command {
+    let mut process = tokio::process::Command::new("cmd.exe");
+    process
+        .arg("/D")
+        .arg("/S")
+        .arg("/C")
+        .arg(command)
+        .current_dir(workspace);
+    process
+}
+
+#[cfg(not(windows))]
+fn native_shell_command(command: &str, workspace: &Path) -> tokio::process::Command {
+    let mut process = tokio::process::Command::new("bash");
+    process.arg("-lc").arg(command).current_dir(workspace);
+    process
 }
 
 fn ensure_secret_access(path: &Path, protect_secrets: bool) -> Result<(), McpError> {
@@ -595,7 +609,7 @@ mod tests {
         let mcp = PcMcp::new(state.clone());
 
         let started = Instant::now();
-        mcp.start_command("sleep 12; printf done".into())
+        mcp.start_command(long_test_command().into())
             .await
             .expect("long command should detach cleanly");
 
@@ -623,8 +637,18 @@ mod tests {
         let log = tokio::fs::read_to_string(&entry.log_path)
             .await
             .expect("read command log");
-        assert_eq!(log, "done");
+        assert_eq!(log.trim(), "done");
 
         let _ = tokio::fs::remove_dir_all(workspace).await;
+    }
+
+    #[cfg(windows)]
+    fn long_test_command() -> &'static str {
+        "ping -n 13 127.0.0.1 >NUL & echo done"
+    }
+
+    #[cfg(not(windows))]
+    fn long_test_command() -> &'static str {
+        "sleep 12; printf done"
     }
 }
