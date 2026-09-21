@@ -6,6 +6,9 @@ PC_WORKSPACE="${PC_WORKSPACE:-/workspace}"
 PC_SECURITY_MODE="${PC_SECURITY_MODE:-full}"
 PC_SECURITY_NETWORK="${PC_SECURITY_NETWORK:-true}"
 PC_SECURITY_PROTECT_SECRETS="${PC_SECURITY_PROTECT_SECRETS:-true}"
+PC_PRODUCTION="${PC_PRODUCTION:-false}"
+PC_PUBLIC_URL="${PC_PUBLIC_URL:-}"
+PC_ALLOWED_REDIRECT_HOSTS="${PC_ALLOWED_REDIRECT_HOSTS:-}"
 
 case "$PC_SECURITY_MODE" in
   full|safe|readonly) ;;
@@ -20,6 +23,11 @@ esac
 case "$PC_SECURITY_PROTECT_SECRETS" in
   true|false) ;;
   *) echo "PC_SECURITY_PROTECT_SECRETS must be true or false" >&2; exit 2 ;;
+esac
+
+case "$PC_PRODUCTION" in
+  true|false) ;;
+  *) echo "PC_PRODUCTION must be true or false" >&2; exit 2 ;;
 esac
 
 yaml_string() {
@@ -47,6 +55,32 @@ tmp="$config.tmp.$$"
     printf '\n'
   else
     printf 'oauth_password: null\n'
+  fi
+
+  if [ -n "$PC_PUBLIC_URL" ]; then
+    printf 'public_url: '
+    yaml_string "$PC_PUBLIC_URL"
+    printf '\n'
+  else
+    printf 'public_url: null\n'
+  fi
+
+  printf 'production: %s\n' "$PC_PRODUCTION"
+
+  if [ -n "$PC_ALLOWED_REDIRECT_HOSTS" ]; then
+    printf 'allowed_redirect_hosts:\n'
+    old_ifs="$IFS"
+    IFS=','
+    for host in $PC_ALLOWED_REDIRECT_HOSTS; do
+      host="$(printf '%s' "$host" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')"
+      [ -z "$host" ] && continue
+      printf '  - '
+      yaml_string "$host"
+      printf '\n'
+    done
+    IFS="$old_ifs"
+  else
+    printf 'allowed_redirect_hosts: []\n'
   fi
 
   printf 'security:\n'

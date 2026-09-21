@@ -9,6 +9,9 @@ use serde::{Deserialize, Serialize};
 pub struct PcConfig {
     pub workspace: PathBuf,
     pub oauth_password: Option<String>,
+    pub public_url: Option<String>,
+    pub production: bool,
+    pub allowed_redirect_hosts: Vec<String>,
     pub security: SecurityConfig,
 }
 
@@ -17,6 +20,9 @@ impl Default for PcConfig {
         Self {
             workspace: PathBuf::from("."),
             oauth_password: None,
+            public_url: None,
+            production: false,
+            allowed_redirect_hosts: Vec::new(),
             security: SecurityConfig::default(),
         }
     }
@@ -58,6 +64,9 @@ impl Default for SecurityConfig {
 pub struct ConfigOverrides {
     pub workspace: Option<PathBuf>,
     pub oauth_password: Option<String>,
+    pub public_url: Option<String>,
+    pub production: Option<bool>,
+    pub allowed_redirect_hosts: Option<Vec<String>>,
     pub security_mode: Option<SecurityMode>,
     pub security_network: Option<bool>,
     pub security_protect_secrets: Option<bool>,
@@ -173,6 +182,15 @@ fn apply_overrides(config: &mut PcConfig, overrides: &ConfigOverrides) {
     }
     if let Some(oauth_password) = overrides.oauth_password.as_ref() {
         config.oauth_password = Some(oauth_password.clone());
+    }
+    if let Some(public_url) = overrides.public_url.as_ref() {
+        config.public_url = Some(public_url.clone());
+    }
+    if let Some(production) = overrides.production {
+        config.production = production;
+    }
+    if let Some(allowed_redirect_hosts) = overrides.allowed_redirect_hosts.as_ref() {
+        config.allowed_redirect_hosts = allowed_redirect_hosts.clone();
     }
     if let Some(mode) = overrides.security_mode {
         config.security.mode = mode;

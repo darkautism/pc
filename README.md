@@ -35,11 +35,15 @@ To use another config directory, set `PC_HOME`, for example `PC_HOME=/srv/pc pc`
 
 If the file does not exist, pc creates it automatically and generates `oauth_password` with OpenSSL. If `openssl` is unavailable, pc stops with an error and asks you to create the config file manually.
 
-The user-facing config has five settings:
+A complete config can contain both coding/security settings and public OAuth deployment settings:
 
 ```yaml
 workspace: /path/to/project
 oauth_password: "replace-with-a-long-password"
+public_url: "https://pc.example.com"
+production: true
+allowed_redirect_hosts:
+  - "client.example.com"
 security:
   mode: safe
   network: true
@@ -48,17 +52,18 @@ security:
 
 After writing that file, starting `pc` is enough. The SQLite database and sandbox state are stored beside it under the pc config directory, so the launch working directory does not own application state.
 
-The five equivalent environment overrides are:
+Environment variables can override the corresponding config values for that process:
 
 | config | environment |
 | --- | --- |
 | `workspace` | `PC_WORKSPACE` |
 | `oauth_password` | `PC_OAUTH_PASSWORD` |
+| `public_url` | `PC_PUBLIC_URL` |
+| `production` | `PC_PRODUCTION` |
+| `allowed_redirect_hosts` | `PC_ALLOWED_REDIRECT_HOSTS` (comma-separated) |
 | `security.mode` | `PC_SECURITY_MODE` |
 | `security.network` | `PC_SECURITY_NETWORK` |
 | `security.protect_secrets` | `PC_SECURITY_PROTECT_SECRETS` |
-
-Environment values override the corresponding config values for that process.
 
 ## Security modes
 
@@ -82,11 +87,11 @@ The OAuth implementation includes:
 - reverse-proxy/public URL handling
 - redirect-host allowlisting in production
 
-For public deployment, `PC_PRODUCTION=true`, `PC_PUBLIC_URL=https://...`, and `PC_ALLOWED_REDIRECT_HOSTS` remain deployment settings. They are not part of the five user-facing coding/security settings.
+For public deployment, set `production: true`, `public_url`, and `allowed_redirect_hosts` in `config.yaml`. The equivalent `PC_*` environment variables remain available as overrides.
 
 ## Docker
 
-Only the container image uses `/app/data`. The image sets `PC_HOME=/app/data`; its entrypoint writes `/app/data/config.yaml` from the same five settings before starting pc.
+Only the container image uses `/app/data`. The image sets `PC_HOME=/app/data`; its entrypoint writes `/app/data/config.yaml` before starting pc.
 
 Docker defaults:
 
@@ -95,6 +100,7 @@ PC_WORKSPACE=/workspace
 PC_SECURITY_MODE=full
 PC_SECURITY_NETWORK=true
 PC_SECURITY_PROTECT_SECRETS=true
+PC_PRODUCTION=false
 ```
 
 Set the OAuth password explicitly:
@@ -107,7 +113,7 @@ docker run --rm -p 8686:8686 \
   ghcr.io/darkautism/pc:latest
 ```
 
-All five container settings can be supplied as environment variables:
+Container settings can also be supplied as environment variables:
 
 ```bash
 docker run --rm -p 8686:8686 \
@@ -118,6 +124,9 @@ docker run --rm -p 8686:8686 \
   -e PC_SECURITY_MODE=full \
   -e PC_SECURITY_NETWORK=true \
   -e PC_SECURITY_PROTECT_SECRETS=true \
+  -e PC_PUBLIC_URL='https://pc.example.com' \
+  -e PC_PRODUCTION=true \
+  -e PC_ALLOWED_REDIRECT_HOSTS='client.example.com' \
   ghcr.io/darkautism/pc:latest
 ```
 

@@ -49,11 +49,16 @@ struct Args {
     #[arg(long, env = "PC_SECURITY_PROTECT_SECRETS")]
     security_protect_secrets: Option<bool>,
 
-    #[arg(long, env = "PC_ALLOWED_REDIRECT_HOSTS", default_value = "")]
-    allowed_redirect_hosts: String,
+    #[arg(long, env = "PC_ALLOWED_REDIRECT_HOSTS")]
+    allowed_redirect_hosts: Option<String>,
 
-    #[arg(long, env = "PC_PRODUCTION", default_value_t = false)]
-    production: bool,
+    #[arg(
+        long,
+        env = "PC_PRODUCTION",
+        num_args = 0..=1,
+        default_missing_value = "true"
+    )]
+    production: Option<bool>,
 }
 
 pub(crate) struct AppState {
@@ -90,37 +95,42 @@ async fn async_main() -> anyhow::Result<()> {
     let PcConfig {
         workspace,
         oauth_password,
+        public_url,
+        production,
+        allowed_redirect_hosts,
         security,
     } = config::load_or_create(
         &home,
         ConfigOverrides {
             workspace: args.workspace.clone(),
             oauth_password: args.oauth_password.clone(),
+            public_url: args.public_url.clone(),
+            production: args.production,
+            allowed_redirect_hosts: args.allowed_redirect_hosts.as_deref().map(parse_hosts),
             security_mode: args.security_mode,
             security_network: args.security_network,
             security_protect_secrets: args.security_protect_secrets,
         },
     )
     .await?;
-    let public_url = args
-        .public_url
+    let public_url = public_url
         .as_deref()
         .map(str::trim)
         .filter(|v| !v.is_empty())
         .map(|v| v.trim_end_matches('/').to_string());
-    let allowed_redirect_hosts = parse_hosts(&args.allowed_redirect_hosts);
+    let allowed_redirect_hosts = normalize_hosts(allowed_redirect_hosts);
 
     if let Some(public) = public_url.as_deref() {
         validate_public_url(public)?;
     }
-    if args.production {
+    if production {
         let public = public_url
             .as_deref()
-            .context("PC_PUBLIC_URL is required in production")?;
-        let parsed = Url::parse(public).context("parse PC_PUBLIC_URL")?;
+            .context("public_url is required in production")?;
+        let parsed = Url::parse(public).context("parse public_url")?;
         ensure!(
             parsed.scheme() == "https" && parsed.host_str().is_some(),
-            "PC_PUBLIC_URL must be an absolute https:// URL in production"
+            "public_url must be an absolute https:// URL in production"
         );
         ensure!(
             oauth_password.as_deref().is_some_and(|v| v.len() >= 16),
@@ -128,7 +138,7 @@ async fn async_main() -> anyhow::Result<()> {
         );
         ensure!(
             !allowed_redirect_hosts.is_empty(),
-            "PC_ALLOWED_REDIRECT_HOSTS is required in production"
+            "allowed_redirect_hosts is required in production"
         );
     }
 
@@ -176,7 +186,7 @@ async fn async_main() -> anyhow::Result<()> {
         security,
         sandbox,
         allowed_redirect_hosts,
-        production: args.production,
+        production,
         processes: ProcessRegistry::default(),
     });
 
@@ -219,34 +229,38 @@ async fn async_main() -> anyhow::Result<()> {
 }
 
 fn parse_hosts(raw: &str) -> Vec<String> {
-    raw.split(',')
-        .map(str::trim)
+    normalize_hosts(raw.split(',').map(str::to_string).collect())
+}
+
+fn normalize_hosts(hosts: Vec<String>) -> Vec<String> {
+    hosts
+        .into_iter()
+        .map(|v| v.trim().to_ascii_lowercase())
         .filter(|v| !v.is_empty())
-        .map(|v| v.to_ascii_lowercase())
         .collect()
 }
 
 fn validate_public_url(raw: &str) -> anyhow::Result<()> {
-    let parsed = Url::parse(raw).context("parse PC_PUBLIC_URL")?;
+    let parsed = Url::parse(raw).context("parse public_url")?;
     ensure!(
         parsed.host_str().is_some(),
-        "PC_PUBLIC_URL must contain a host"
+        "public_url must contain a host"
     );
     ensure!(
         parsed.username().is_empty(),
-        "PC_PUBLIC_URL must not contain username"
+        "public_url must not contain username"
     );
     ensure!(
         parsed.password().is_none(),
-        "PC_PUBLIC_URL must not contain password"
+        "public_url must not contain password"
     );
     ensure!(
         parsed.query().is_none(),
-        "PC_PUBLIC_URL must not contain query"
+        "public_url must not contain query"
     );
     ensure!(
         parsed.fragment().is_none(),
-        "PC_PUBLIC_URL must not contain fragment"
+        "public_url must not contain fragment"
     );
     Ok(())
 }
@@ -258,7 +272,7 @@ fn mcp_http_config(public_url: Option<&str>) -> anyhow::Result<StreamableHttpSer
         "::1".to_string(),
     ];
     if let Some(public) = public_url {
-        let parsed = Url::parse(public).context("parse PC_PUBLIC_URL for MCP host guard")?;
+        let parsed = Url::parse(public).context("parse public_url for MCP host guard")?;
         if let Some(host) = parsed.host_str() {
             let host = host.to_ascii_lowercase();
             if !allowed_hosts.contains(&host) {
