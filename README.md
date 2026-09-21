@@ -25,11 +25,15 @@ bash is non-interactive. Pipes and redirection are supported; PTY/curses program
 
 ## Native / manual install
 
-A normal installation does **not** use `/app/data`. On startup pc reads:
+A normal installation stores its config here:
 
 ```text
 ~/.config/pc/config.yaml
 ```
+
+To use another config directory, set `PC_HOME`, for example `PC_HOME=/srv/pc pc`.
+
+If the file does not exist, pc creates it automatically and generates `oauth_password` with OpenSSL. If `openssl` is unavailable, pc stops with an error and asks you to create the config file manually.
 
 The user-facing config has five settings:
 

@@ -64,9 +64,6 @@ pub struct ConfigOverrides {
 }
 
 pub fn default_home() -> anyhow::Result<PathBuf> {
-    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
-        return Ok(PathBuf::from(path).join("pc"));
-    }
     if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
         return Ok(PathBuf::from(home).join(".config").join("pc"));
     }
@@ -85,27 +82,65 @@ pub async fn load_or_create(home: &Path, overrides: ConfigOverrides) -> anyhow::
     set_private_dir(home).await?;
 
     let path = home.join("config.yaml");
+    let mut created = false;
     let mut config = match tokio::fs::read_to_string(&path).await {
         Ok(text) => {
             serde_yaml::from_str(&text).with_context(|| format!("parse {}", path.display()))?
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let mut config = PcConfig::default();
-            apply_overrides(&mut config, &overrides);
-            let text = serde_yaml::to_string(&config).context("serialize default pc config")?;
-            tokio::fs::write(&path, text)
-                .await
-                .with_context(|| format!("write {}", path.display()))?;
-            config
+            created = true;
+            PcConfig::default()
         }
         Err(error) => {
             return Err(error).with_context(|| format!("read {}", path.display()));
         }
     };
-    set_private_file(&path).await?;
 
     apply_overrides(&mut config, &overrides);
+    if config.oauth_password.as_deref().is_none_or(str::is_empty) {
+        config.oauth_password = Some(generate_oauth_password(&path).await?);
+        created = true;
+    }
+
+    if created {
+        let text = serde_yaml::to_string(&config).context("serialize pc config")?;
+        tokio::fs::write(&path, text)
+            .await
+            .with_context(|| format!("write {}", path.display()))?;
+    }
+    set_private_file(&path).await?;
     Ok(config)
+}
+
+async fn generate_oauth_password(config_path: &Path) -> anyhow::Result<String> {
+    let output = tokio::process::Command::new("openssl")
+        .args(["rand", "-base64", "32"])
+        .output()
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!(
+                "cannot generate oauth_password because OpenSSL is unavailable ({error}). Create {} manually and set oauth_password.",
+                config_path.display()
+            )
+        })?;
+    if !output.status.success() {
+        return Err(anyhow::anyhow!(
+            "cannot generate oauth_password with OpenSSL: {}. Create {} manually and set oauth_password.",
+            String::from_utf8_lossy(&output.stderr).trim(),
+            config_path.display()
+        ));
+    }
+    let password = String::from_utf8(output.stdout)
+        .context("OpenSSL returned a non-UTF-8 oauth password")?
+        .trim()
+        .to_string();
+    if password.is_empty() {
+        return Err(anyhow::anyhow!(
+            "OpenSSL returned an empty oauth_password. Create {} manually and set oauth_password.",
+            config_path.display()
+        ));
+    }
+    Ok(password)
 }
 
 #[cfg(unix)]
