@@ -145,10 +145,7 @@ async fn async_main() -> anyhow::Result<()> {
     let home = tokio::fs::canonicalize(&home)
         .await
         .with_context(|| format!("canonicalize PC_HOME {}", home.display()))?;
-    let database_url = args
-        .database_url
-        .clone()
-        .unwrap_or_else(|| format!("sqlite://{}?mode=rwc", home.join("pc.db").display()));
+    let database_path = home.join("pc.db");
     let workspace = tokio::fs::canonicalize(&workspace)
         .await
         .with_context(|| format!("canonicalize workspace {}", workspace.display()))?;
@@ -166,11 +163,14 @@ async fn async_main() -> anyhow::Result<()> {
         None
     };
 
-    let connect_options = SqliteConnectOptions::from_str(&database_url)
-        .context("parse sqlite URL")?
-        .create_if_missing(true)
-        .foreign_keys(true)
-        .journal_mode(SqliteJournalMode::Wal);
+    let connect_options = if let Some(database_url) = args.database_url.as_deref() {
+        SqliteConnectOptions::from_str(database_url).context("parse sqlite URL")?
+    } else {
+        SqliteConnectOptions::new().filename(&database_path)
+    }
+    .create_if_missing(true)
+    .foreign_keys(true)
+    .journal_mode(SqliteJournalMode::Wal);
     let db = SqlitePoolOptions::new()
         .max_connections(8)
         .connect_with(connect_options)

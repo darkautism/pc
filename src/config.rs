@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
+use uuid::Uuid;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -93,9 +94,7 @@ pub async fn load_or_create(home: &Path, overrides: ConfigOverrides) -> anyhow::
     let path = home.join("config.yaml");
     let mut created = false;
     let mut config = match tokio::fs::read_to_string(&path).await {
-        Ok(text) => {
-            serde_yaml::from_str(&text).with_context(|| format!("parse {}", path.display()))?
-        }
+        Ok(text) => parse_config(&text, &path)?,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             created = true;
             PcConfig::default()
@@ -107,7 +106,7 @@ pub async fn load_or_create(home: &Path, overrides: ConfigOverrides) -> anyhow::
 
     apply_overrides(&mut config, &overrides);
     if config.oauth_password.as_deref().is_none_or(str::is_empty) {
-        config.oauth_password = Some(generate_oauth_password(&path).await?);
+        config.oauth_password = Some(generate_oauth_password());
         created = true;
     }
 
@@ -121,35 +120,93 @@ pub async fn load_or_create(home: &Path, overrides: ConfigOverrides) -> anyhow::
     Ok(config)
 }
 
-async fn generate_oauth_password(config_path: &Path) -> anyhow::Result<String> {
-    let output = tokio::process::Command::new("openssl")
-        .args(["rand", "-base64", "32"])
-        .output()
-        .await
-        .map_err(|error| {
-            anyhow::anyhow!(
-                "cannot generate oauth_password because OpenSSL is unavailable ({error}). Create {} manually and set oauth_password.",
-                config_path.display()
-            )
-        })?;
-    if !output.status.success() {
-        return Err(anyhow::anyhow!(
-            "cannot generate oauth_password with OpenSSL: {}. Create {} manually and set oauth_password.",
-            String::from_utf8_lossy(&output.stderr).trim(),
-            config_path.display()
-        ));
+fn generate_oauth_password() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn parse_config(text: &str, path: &Path) -> anyhow::Result<PcConfig> {
+    match serde_yaml::from_str(text) {
+        Ok(config) => Ok(config),
+        Err(primary) => {
+            if let Some(repaired) = repair_windows_workspace_yaml(text)
+                && let Ok(config) = serde_yaml::from_str(&repaired)
+            {
+                return Ok(config);
+            }
+            Err(primary).with_context(|| format!("parse {}", path.display()))
+        }
     }
-    let password = String::from_utf8(output.stdout)
-        .context("OpenSSL returned a non-UTF-8 oauth password")?
-        .trim()
-        .to_string();
-    if password.is_empty() {
-        return Err(anyhow::anyhow!(
-            "OpenSSL returned an empty oauth_password. Create {} manually and set oauth_password.",
-            config_path.display()
-        ));
+}
+
+fn repair_windows_workspace_yaml(text: &str) -> Option<String> {
+    let mut changed = false;
+    let mut out = String::with_capacity(text.len());
+
+    for line in text.split_inclusive('\n') {
+        let (body, newline) = line
+            .strip_suffix('\n')
+            .map_or((line, ""), |body| (body, "\n"));
+        let trimmed = body.trim_start();
+        let indent_len = body.len() - trimmed.len();
+        let Some(rest) = trimmed.strip_prefix("workspace:") else {
+            out.push_str(line);
+            continue;
+        };
+        let value = rest.trim_start();
+        let spacing_len = rest.len() - value.len();
+        if !value.starts_with('"') {
+            out.push_str(line);
+            continue;
+        }
+        let Some(end_rel) = value[1..].rfind('"') else {
+            out.push_str(line);
+            continue;
+        };
+        let end = end_rel + 1;
+        let inner = &value[1..end];
+        if !looks_like_windows_path(inner) || !inner.contains('\\') {
+            out.push_str(line);
+            continue;
+        }
+
+        changed = true;
+        out.push_str(&body[..indent_len]);
+        out.push_str("workspace:");
+        out.push_str(&rest[..spacing_len]);
+        out.push('"');
+        out.push_str(&inner.replace('\\', "\\\\"));
+        out.push('"');
+        out.push_str(&value[end + 1..]);
+        out.push_str(newline);
     }
-    Ok(password)
+
+    changed.then_some(out)
+}
+
+fn looks_like_windows_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    (bytes.len() >= 3 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && bytes[2] == b'\\')
+        || value.starts_with("\\\\")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accepts_common_double_quoted_windows_workspace_path() {
+        let raw = "workspace: \"E:\\project\"\n";
+        let repaired = repair_windows_workspace_yaml(raw).expect("repair");
+        let config: PcConfig = serde_yaml::from_str(&repaired).expect("parse repaired config");
+        assert_eq!(config.workspace, PathBuf::from(r"E:\project"));
+    }
+
+    #[test]
+    fn generated_oauth_password_is_self_contained() {
+        let password = generate_oauth_password();
+        assert_eq!(password.len(), 64);
+        assert!(password.bytes().all(|byte| byte.is_ascii_hexdigit()));
+    }
 }
 
 #[cfg(unix)]

@@ -33,7 +33,7 @@ A normal installation stores its config here:
 
 To use another config directory, set `PC_HOME`, for example `PC_HOME=/srv/pc pc`.
 
-If the file does not exist, pc creates it automatically and generates `oauth_password` with OpenSSL. If `openssl` is unavailable, pc stops with an error and asks you to create the config file manually.
+If the file does not exist, pc creates it automatically and generates `oauth_password` internally; no external OpenSSL installation is required.
 
 A complete config can contain both coding/security settings and public OAuth deployment settings:
 
@@ -50,7 +50,7 @@ security:
   protect_secrets: true
 ```
 
-After writing that file, starting `pc` is enough. The SQLite database and sandbox state are stored beside it under the pc config directory, so the launch working directory does not own application state.
+After writing that file, starting `pc` is enough. On Windows, native paths such as `workspace: E:\project` are accepted directly; the common `workspace: "E:\project"` form is also tolerated. The SQLite database and sandbox state are stored beside the config using native filesystem paths, so Windows drive letters are never forced through a SQLite URL.
 
 Environment variables can override the corresponding config values for that process:
 

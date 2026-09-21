@@ -14,7 +14,6 @@ RUN apt-get update \
         curl \
         git \
         openssh-client \
-        openssl \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /app/data /workspace
 
