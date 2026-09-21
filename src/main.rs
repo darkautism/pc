@@ -22,7 +22,7 @@ use tools::{PcMcp, ProcessRegistry};
 
 #[derive(Parser, Debug)]
 struct Args {
-    #[arg(long, env = "PC_LISTEN", default_value = "0.0.0.0:8787")]
+    #[arg(long, env = "PC_LISTEN", default_value = "0.0.0.0:8686")]
     listen: SocketAddr,
 
     #[arg(long, env = "PC_DATABASE_URL")]

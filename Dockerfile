@@ -24,14 +24,14 @@ RUN chmod 0755 /usr/local/bin/pc-entrypoint
 
 WORKDIR /app
 
-ENV PC_LISTEN=0.0.0.0:8787
+ENV PC_LISTEN=0.0.0.0:8686
 ENV PC_HOME=/app/data
 ENV PC_WORKSPACE=/workspace
 ENV PC_SECURITY_MODE=full
 ENV PC_SECURITY_NETWORK=true
 ENV PC_SECURITY_PROTECT_SECRETS=true
 
-EXPOSE 8787
+EXPOSE 8686
 
 VOLUME ["/app/data", "/workspace"]
 

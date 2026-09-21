@@ -84,7 +84,7 @@ fn issuer(state: &AppState, headers: &HeaderMap) -> String {
     let host = headers
         .get(header::HOST)
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("127.0.0.1:8787");
+        .unwrap_or("127.0.0.1:8686");
 
     let forwarded_https = headers
         .get("x-forwarded-proto")

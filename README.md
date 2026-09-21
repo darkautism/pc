@@ -100,7 +100,7 @@ PC_SECURITY_PROTECT_SECRETS=true
 Set the OAuth password explicitly:
 
 ```bash
-docker run --rm -p 8787:8787 \
+docker run --rm -p 8686:8686 \
   -v "$PWD:/workspace" \
   -v pc-data:/app/data \
   -e PC_OAUTH_PASSWORD='a-long-password' \
@@ -110,7 +110,7 @@ docker run --rm -p 8787:8787 \
 All five container settings can be supplied as environment variables:
 
 ```bash
-docker run --rm -p 8787:8787 \
+docker run --rm -p 8686:8686 \
   -v "$PWD:/workspace" \
   -v pc-data:/app/data \
   -e PC_WORKSPACE=/workspace \
