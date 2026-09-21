@@ -674,7 +674,6 @@ mod tests {
             .expect("create test workspace");
 
         let state = Arc::new(AppState {
-            db: sqlx::SqlitePool::connect_lazy("sqlite::memory:").expect("lazy sqlite"),
             public_url: None,
             oauth_password: None,
             workspace: workspace.clone(),

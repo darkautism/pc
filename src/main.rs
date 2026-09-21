@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Instant};
+use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 
 use anyhow::{Context, ensure};
 use axum::{
@@ -11,7 +11,6 @@ use clap::Parser;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use tower_http::trace::TraceLayer;
 use tracing::info;
 use url::Url;
@@ -29,9 +28,6 @@ use tools::{PcMcp, ProcessRegistry};
 struct Args {
     #[arg(long, env = "PC_LISTEN", default_value = "0.0.0.0:8686")]
     listen: SocketAddr,
-
-    #[arg(long, env = "PC_DATABASE_URL")]
-    database_url: Option<String>,
 
     #[arg(long, env = "PC_PUBLIC_URL")]
     public_url: Option<String>,
@@ -67,7 +63,6 @@ struct Args {
 }
 
 pub(crate) struct AppState {
-    pub db: sqlx::SqlitePool,
     pub public_url: Option<String>,
     pub oauth_password: Option<String>,
     pub workspace: PathBuf,
@@ -156,7 +151,6 @@ async fn async_main() -> anyhow::Result<()> {
     let home = tokio::fs::canonicalize(&home)
         .await
         .with_context(|| format!("canonicalize PC_HOME {}", home.display()))?;
-    let database_path = home.join("pc.db");
     let workspace = tokio::fs::canonicalize(&workspace)
         .await
         .with_context(|| format!("canonicalize workspace {}", workspace.display()))?;
@@ -174,23 +168,7 @@ async fn async_main() -> anyhow::Result<()> {
         None
     };
 
-    let connect_options = if let Some(database_url) = args.database_url.as_deref() {
-        SqliteConnectOptions::from_str(database_url).context("parse sqlite URL")?
-    } else {
-        SqliteConnectOptions::new().filename(&database_path)
-    }
-    .create_if_missing(true)
-    .foreign_keys(true)
-    .journal_mode(SqliteJournalMode::Wal);
-    let db = SqlitePoolOptions::new()
-        .max_connections(8)
-        .connect_with(connect_options)
-        .await
-        .context("connect sqlite")?;
-    sqlx::migrate!().run(&db).await.context("run migrations")?;
-
     let state = Arc::new(AppState {
-        db,
         public_url,
         oauth_password,
         workspace,
@@ -202,7 +180,7 @@ async fn async_main() -> anyhow::Result<()> {
     });
 
     let oauth_state = Arc::new(
-        OAuthState::open_migrating_legacy(
+        OAuthState::open(
             home.join("oauth.db"),
             OAuthConfig {
                 service_name: "pc".into(),
@@ -217,7 +195,6 @@ async fn async_main() -> anyhow::Result<()> {
                 },
                 client_id_metadata_document_supported: false,
             },
-            &state.db,
         )
         .await
         .context("open OAuth database")?,

@@ -1182,7 +1182,7 @@ dependencies = [
 [[package]]
 name = "oauth"
 version = "0.1.0"
-source = "git+https://github.com/darkautism/oauth.git?rev=07c7f8a8cc2e0e1fdf343355590b60990d502657#07c7f8a8cc2e0e1fdf343355590b60990d502657"
+source = "git+https://github.com/darkautism/oauth.git?rev=0b8921604bccd49f0de2ecf9454fd774540747bc#0b8921604bccd49f0de2ecf9454fd774540747bc"
 dependencies = [
  "async-trait",
  "axum",
@@ -1262,7 +1262,6 @@ dependencies = [
  "serde_json",
  "serde_yaml",
  "sha2",
- "sqlx",
  "tokio",
  "tower-http",
  "tracing",
