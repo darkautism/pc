@@ -17,11 +17,11 @@ use tracing::info;
 use url::Url;
 
 mod config;
-mod oauth;
 mod sandbox;
 mod tools;
 
 use config::{ConfigOverrides, PcConfig, SecurityConfig, SecurityMode};
+use oauth::{OAuthConfig, OAuthState, RedirectPolicy, TokenPrefixes};
 use sandbox::SafeSandbox;
 use tools::{PcMcp, ProcessRegistry};
 
@@ -201,6 +201,23 @@ async fn async_main() -> anyhow::Result<()> {
         processes: ProcessRegistry::default(),
     });
 
+    let oauth_state = Arc::new(OAuthState::new(
+        state.db.clone(),
+        OAuthConfig {
+            service_name: "pc".into(),
+            scope: "pc".into(),
+            public_url: state.public_url.clone(),
+            oauth_password: state.oauth_password.clone(),
+            default_host: "127.0.0.1:8686".into(),
+            token_prefixes: TokenPrefixes::new("pc"),
+            redirect_policy: RedirectPolicy::Restricted {
+                production: state.production,
+                allowed_hosts: state.allowed_redirect_hosts.clone(),
+            },
+            client_id_metadata_document_supported: false,
+        },
+    ));
+
     let mcp_config = mcp_http_config(state.public_url.as_deref())?;
     let root_mcp_config = mcp_http_config(state.public_url.as_deref())?;
 
@@ -222,12 +239,12 @@ async fn async_main() -> anyhow::Result<()> {
         .route_service("/", root_mcp_service)
         .route_service("/mcp", mcp_service)
         .route_layer(middleware::from_fn_with_state(
-            state.clone(),
+            oauth_state.clone(),
             oauth::require_mcp_auth,
         ));
 
     let app = Router::new()
-        .merge(oauth::router())
+        .merge(oauth::router(oauth_state.clone()))
         .merge(mcp_router)
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(TraceLayer::new_for_http())
