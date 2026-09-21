@@ -1229,7 +1229,7 @@ dependencies = [
 [[package]]
 name = "oauth"
 version = "0.1.0"
-source = "git+https://github.com/darkautism/oauth.git?rev=587288ca8faf7631fa9123565fe013b007d0fcec#587288ca8faf7631fa9123565fe013b007d0fcec"
+source = "git+https://github.com/darkautism/oauth.git?rev=fabdc94fcc8aad89f88fcc0b2b29679cd777d7df#fabdc94fcc8aad89f88fcc0b2b29679cd777d7df"
 dependencies = [
  "async-trait",
  "axum",

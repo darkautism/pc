@@ -28,7 +28,13 @@ use crate::{AppState, config::SecurityMode};
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_OUTPUT_LINES: usize = 2000;
 const SYNC_WAIT: Duration = Duration::from_secs(10);
-const PC_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
+const PC_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
+    ProtocolVersion::V_2026_07_28,
+    ProtocolVersion::V_2025_11_25,
+    ProtocolVersion::V_2025_06_18,
+    ProtocolVersion::V_2025_03_26,
+    ProtocolVersion::V_2024_11_05,
+];
 
 #[derive(Clone, Default)]
 pub struct ProcessRegistry {
@@ -698,8 +704,33 @@ mod tests {
     }
 
     #[test]
-    fn advertises_chatgpt_discovery_protocol() {
-        assert_eq!(PC_PROTOCOL_VERSIONS, &[ProtocolVersion::V_2026_07_28]);
+    fn advertises_mcpx_compatible_discovery_protocols() {
+        assert_eq!(
+            PC_PROTOCOL_VERSIONS,
+            &[
+                ProtocolVersion::V_2026_07_28,
+                ProtocolVersion::V_2025_11_25,
+                ProtocolVersion::V_2025_06_18,
+                ProtocolVersion::V_2025_03_26,
+                ProtocolVersion::V_2024_11_05,
+            ]
+        );
+    }
+
+    #[test]
+    fn keeps_tools_list_lean_for_chatgpt_discovery() {
+        for tool in [
+            PcMcp::read_tool_attr(),
+            PcMcp::write_tool_attr(),
+            PcMcp::edit_tool_attr(),
+            PcMcp::bash_tool_attr(),
+        ] {
+            assert!(
+                tool.output_schema.is_none(),
+                "{} must not expose outputSchema during ChatGPT discovery",
+                tool.name
+            );
+        }
     }
 
     #[tokio::test]
