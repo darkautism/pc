@@ -52,8 +52,8 @@ jobs:
           }
           Stop-Process -Id $process.Id -Force
 
-          if (-not (Test-Path (Join-Path $pcHome "pc.db"))) {
-            throw "pc.db was not created through a native Windows filesystem path"
+          if (-not (Test-Path (Join-Path $pcHome "oauth.db"))) {
+            throw "oauth.db was not created through a native Windows filesystem path"
           }
           $config = Get-Content (Join-Path $pcHome "config.yaml") -Raw
           if ($config -notmatch "oauth_password:\s+\S+") {

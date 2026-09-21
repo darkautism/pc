@@ -130,5 +130,5 @@ docker run --rm -p 8686:8686 \
   ghcr.io/darkautism/pc:latest
 ```
 
-The entrypoint validates these values and atomically rewrites `/app/data/config.yaml` before launching pc. The OAuth SQLite database is then derived from `PC_HOME` and stored at `/app/data/pc.db`.
+The entrypoint validates these values and atomically rewrites `/app/data/config.yaml` before launching pc. The OAuth SQLite database is derived from `PC_HOME` and stored at `/app/data/oauth.db`.
 
