@@ -28,19 +28,19 @@ jobs:
       - name: Smoke test native Windows paths
         shell: pwsh
         run: |
-          $home = Join-Path $env:RUNNER_TEMP "pc-home"
-          $workspace = Join-Path $env:RUNNER_TEMP "pc-workspace"
-          New-Item -ItemType Directory -Force $home, $workspace | Out-Null
+          $pcHome = Join-Path $env:RUNNER_TEMP "pc-home"
+          $pcWorkspace = Join-Path $env:RUNNER_TEMP "pc-workspace"
+          New-Item -ItemType Directory -Force $pcHome, $pcWorkspace | Out-Null
 
           @"
-          workspace: "$workspace"
+          workspace: "$pcWorkspace"
           security:
             mode: full
             network: true
             protect_secrets: true
-          "@ | Set-Content -Encoding utf8NoBOM (Join-Path $home "config.yaml")
+          "@ | Set-Content -Encoding utf8NoBOM (Join-Path $pcHome "config.yaml")
 
-          $env:PC_HOME = $home
+          $env:PC_HOME = $pcHome
           $env:PC_LISTEN = "127.0.0.1:0"
           $stdout = Join-Path $env:RUNNER_TEMP "pc-smoke.stdout.log"
           $stderr = Join-Path $env:RUNNER_TEMP "pc-smoke.stderr.log"
@@ -52,10 +52,10 @@ jobs:
           }
           Stop-Process -Id $process.Id -Force
 
-          if (-not (Test-Path (Join-Path $home "pc.db"))) {
+          if (-not (Test-Path (Join-Path $pcHome "pc.db"))) {
             throw "pc.db was not created through a native Windows filesystem path"
           }
-          $config = Get-Content (Join-Path $home "config.yaml") -Raw
+          $config = Get-Content (Join-Path $pcHome "config.yaml") -Raw
           if ($config -notmatch "oauth_password:\s+\S+") {
             throw "oauth_password was not generated internally"
           }
