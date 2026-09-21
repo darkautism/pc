@@ -16,7 +16,7 @@ mod oauth;
 mod sandbox;
 mod tools;
 
-use config::{PcConfig, SecurityConfig, SecurityMode};
+use config::{ConfigOverrides, PcConfig, SecurityConfig, SecurityMode};
 use sandbox::SafeSandbox;
 use tools::{PcMcp, ProcessRegistry};
 
@@ -25,12 +25,8 @@ struct Args {
     #[arg(long, env = "PC_LISTEN", default_value = "0.0.0.0:8787")]
     listen: SocketAddr,
 
-    #[arg(
-        long,
-        env = "PC_DATABASE_URL",
-        default_value = "sqlite://data/pc.db?mode=rwc"
-    )]
-    database_url: String,
+    #[arg(long, env = "PC_DATABASE_URL")]
+    database_url: Option<String>,
 
     #[arg(long, env = "PC_PUBLIC_URL")]
     public_url: Option<String>,
@@ -38,11 +34,20 @@ struct Args {
     #[arg(long, env = "PC_OAUTH_PASSWORD")]
     oauth_password: Option<String>,
 
-    #[arg(long, env = "PC_HOME", default_value = ".")]
-    home: PathBuf,
+    #[arg(long, env = "PC_HOME")]
+    home: Option<PathBuf>,
 
     #[arg(long, env = "PC_WORKSPACE")]
     workspace: Option<PathBuf>,
+
+    #[arg(long, env = "PC_SECURITY_MODE")]
+    security_mode: Option<SecurityMode>,
+
+    #[arg(long, env = "PC_SECURITY_NETWORK")]
+    security_network: Option<bool>,
+
+    #[arg(long, env = "PC_SECURITY_PROTECT_SECRETS")]
+    security_protect_secrets: Option<bool>,
 
     #[arg(long, env = "PC_ALLOWED_REDIRECT_HOSTS", default_value = "")]
     allowed_redirect_hosts: String,
@@ -81,10 +86,22 @@ async fn async_main() -> anyhow::Result<()> {
         .init();
 
     let args = Args::parse();
+    let home = args.home.clone().unwrap_or(config::default_home()?);
     let PcConfig {
         workspace,
+        oauth_password,
         security,
-    } = config::load_or_create(&args.home, args.workspace.clone()).await?;
+    } = config::load_or_create(
+        &home,
+        ConfigOverrides {
+            workspace: args.workspace.clone(),
+            oauth_password: args.oauth_password.clone(),
+            security_mode: args.security_mode,
+            security_network: args.security_network,
+            security_protect_secrets: args.security_protect_secrets,
+        },
+    )
+    .await?;
     let public_url = args
         .public_url
         .as_deref()
@@ -106,10 +123,8 @@ async fn async_main() -> anyhow::Result<()> {
             "PC_PUBLIC_URL must be an absolute https:// URL in production"
         );
         ensure!(
-            args.oauth_password
-                .as_deref()
-                .is_some_and(|v| v.len() >= 16),
-            "PC_OAUTH_PASSWORD must be at least 16 characters in production"
+            oauth_password.as_deref().is_some_and(|v| v.len() >= 16),
+            "oauth_password must be at least 16 characters in production"
         );
         ensure!(
             !allowed_redirect_hosts.is_empty(),
@@ -117,13 +132,13 @@ async fn async_main() -> anyhow::Result<()> {
         );
     }
 
-    if args.database_url.starts_with("sqlite://data/") {
-        tokio::fs::create_dir_all("data").await?;
-    }
-
-    let home = tokio::fs::canonicalize(&args.home)
+    let home = tokio::fs::canonicalize(&home)
         .await
-        .with_context(|| format!("canonicalize PC_HOME {}", args.home.display()))?;
+        .with_context(|| format!("canonicalize PC_HOME {}", home.display()))?;
+    let database_url = args
+        .database_url
+        .clone()
+        .unwrap_or_else(|| format!("sqlite://{}?mode=rwc", home.join("pc.db").display()));
     let workspace = tokio::fs::canonicalize(&workspace)
         .await
         .with_context(|| format!("canonicalize workspace {}", workspace.display()))?;
@@ -141,7 +156,7 @@ async fn async_main() -> anyhow::Result<()> {
         None
     };
 
-    let connect_options = SqliteConnectOptions::from_str(&args.database_url)
+    let connect_options = SqliteConnectOptions::from_str(&database_url)
         .context("parse sqlite URL")?
         .create_if_missing(true)
         .foreign_keys(true)
@@ -156,7 +171,7 @@ async fn async_main() -> anyhow::Result<()> {
     let state = Arc::new(AppState {
         db,
         public_url,
-        oauth_password: args.oauth_password,
+        oauth_password,
         workspace,
         security,
         sandbox,

@@ -18,15 +18,20 @@ RUN apt-get update \
     && mkdir -p /app/data /workspace
 
 COPY --from=builder /src/target/release/pc /usr/local/bin/pc
+COPY docker-entrypoint.sh /usr/local/bin/pc-entrypoint
+RUN chmod 0755 /usr/local/bin/pc-entrypoint
 
 WORKDIR /app
 
 ENV PC_LISTEN=0.0.0.0:8787
-ENV PC_DATABASE_URL=sqlite:///app/data/pc.db?mode=rwc
+ENV PC_HOME=/app/data
 ENV PC_WORKSPACE=/workspace
+ENV PC_SECURITY_MODE=full
+ENV PC_SECURITY_NETWORK=true
+ENV PC_SECURITY_PROTECT_SECRETS=true
 
 EXPOSE 8787
 
 VOLUME ["/app/data", "/workspace"]
 
-ENTRYPOINT ["pc"]
+ENTRYPOINT ["/usr/local/bin/pc-entrypoint"]

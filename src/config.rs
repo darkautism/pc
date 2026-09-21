@@ -1,12 +1,14 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
+use clap::ValueEnum;
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct PcConfig {
     pub workspace: PathBuf,
+    pub oauth_password: Option<String>,
     pub security: SecurityConfig,
 }
 
@@ -14,12 +16,13 @@ impl Default for PcConfig {
     fn default() -> Self {
         Self {
             workspace: PathBuf::from("."),
+            oauth_password: None,
             security: SecurityConfig::default(),
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum SecurityMode {
     Full,
@@ -51,13 +54,35 @@ impl Default for SecurityConfig {
     }
 }
 
-pub async fn load_or_create(
-    home: &Path,
-    workspace_override: Option<PathBuf>,
-) -> anyhow::Result<PcConfig> {
+#[derive(Debug, Default)]
+pub struct ConfigOverrides {
+    pub workspace: Option<PathBuf>,
+    pub oauth_password: Option<String>,
+    pub security_mode: Option<SecurityMode>,
+    pub security_network: Option<bool>,
+    pub security_protect_secrets: Option<bool>,
+}
+
+pub fn default_home() -> anyhow::Result<PathBuf> {
+    if let Some(path) = std::env::var_os("XDG_CONFIG_HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(path).join("pc"));
+    }
+    if let Some(home) = std::env::var_os("HOME").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(home).join(".config").join("pc"));
+    }
+    if let Some(home) = std::env::var_os("USERPROFILE").filter(|value| !value.is_empty()) {
+        return Ok(PathBuf::from(home).join(".config").join("pc"));
+    }
+    Err(anyhow::anyhow!(
+        "cannot determine pc config directory: set PC_HOME, HOME, or USERPROFILE"
+    ))
+}
+
+pub async fn load_or_create(home: &Path, overrides: ConfigOverrides) -> anyhow::Result<PcConfig> {
     tokio::fs::create_dir_all(home)
         .await
         .with_context(|| format!("create PC_HOME {}", home.display()))?;
+    set_private_dir(home).await?;
 
     let path = home.join("config.yaml");
     let mut config = match tokio::fs::read_to_string(&path).await {
@@ -66,9 +91,7 @@ pub async fn load_or_create(
         }
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             let mut config = PcConfig::default();
-            if let Some(workspace) = workspace_override.clone() {
-                config.workspace = workspace;
-            }
+            apply_overrides(&mut config, &overrides);
             let text = serde_yaml::to_string(&config).context("serialize default pc config")?;
             tokio::fs::write(&path, text)
                 .await
@@ -79,10 +102,50 @@ pub async fn load_or_create(
             return Err(error).with_context(|| format!("read {}", path.display()));
         }
     };
+    set_private_file(&path).await?;
 
-    if let Some(workspace) = workspace_override {
-        config.workspace = workspace;
-    }
-
+    apply_overrides(&mut config, &overrides);
     Ok(config)
+}
+
+#[cfg(unix)]
+async fn set_private_dir(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).await?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn set_private_dir(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+async fn set_private_file(path: &Path) -> anyhow::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    tokio::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600)).await?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+async fn set_private_file(_path: &Path) -> anyhow::Result<()> {
+    Ok(())
+}
+
+fn apply_overrides(config: &mut PcConfig, overrides: &ConfigOverrides) {
+    if let Some(workspace) = overrides.workspace.as_ref() {
+        config.workspace = workspace.clone();
+    }
+    if let Some(oauth_password) = overrides.oauth_password.as_ref() {
+        config.oauth_password = Some(oauth_password.clone());
+    }
+    if let Some(mode) = overrides.security_mode {
+        config.security.mode = mode;
+    }
+    if let Some(network) = overrides.security_network {
+        config.security.network = network;
+    }
+    if let Some(protect_secrets) = overrides.security_protect_secrets {
+        config.security.protect_secrets = protect_secrets;
+    }
 }
