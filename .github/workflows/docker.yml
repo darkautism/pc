@@ -37,6 +37,8 @@ jobs:
           context: .
           file: Dockerfile
           platforms: linux/amd64
+          build-args: |
+            PC_BUILD_GIT_SHA=${{ github.sha }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ghcr.io/darkautism/pc:sha-${{ github.sha }}-amd64
           labels: |
@@ -69,6 +71,8 @@ jobs:
           context: .
           file: Dockerfile
           platforms: linux/arm64
+          build-args: |
+            PC_BUILD_GIT_SHA=${{ github.sha }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ghcr.io/darkautism/pc:sha-${{ github.sha }}-arm64
           labels: |

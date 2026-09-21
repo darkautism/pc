@@ -1,7 +1,9 @@
 FROM rust:1-bookworm AS builder
 
 WORKDIR /src
-COPY Cargo.toml Cargo.lock ./
+ARG PC_BUILD_GIT_SHA=unknown
+ENV PC_BUILD_GIT_SHA=${PC_BUILD_GIT_SHA}
+COPY Cargo.toml Cargo.lock build.rs ./
 COPY migrations ./migrations
 COPY src ./src
 RUN cargo build --release --locked

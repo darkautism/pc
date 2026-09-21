@@ -1,7 +1,12 @@
-use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc};
+use std::{net::SocketAddr, path::PathBuf, str::FromStr, sync::Arc, time::Instant};
 
 use anyhow::{Context, ensure};
-use axum::{Router, extract::DefaultBodyLimit, middleware};
+use axum::{
+    Router,
+    extract::{DefaultBodyLimit, Request},
+    middleware::{self, Next},
+    response::Response,
+};
 use clap::Parser;
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
@@ -86,9 +91,15 @@ fn main() -> anyhow::Result<()> {
 }
 
 async fn async_main() -> anyhow::Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    let log_filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("pc=info"));
+    tracing_subscriber::fmt().with_env_filter(log_filter).init();
+
+    info!(
+        version = env!("CARGO_PKG_VERSION"),
+        git_sha = env!("PC_BUILD_GIT_SHA"),
+        "pc starting"
+    );
 
     let args = Args::parse();
     let home = args.home.clone().unwrap_or(config::default_home()?);
@@ -220,12 +231,57 @@ async fn async_main() -> anyhow::Result<()> {
         .merge(mcp_router)
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .layer(TraceLayer::new_for_http())
+        .layer(middleware::from_fn(log_http_request))
         .with_state(state.clone());
 
     let listener = tokio::net::TcpListener::bind(args.listen).await?;
-    info!(listen = %args.listen, workspace = %state.workspace.display(), security_mode = ?state.security.mode, "pc listening");
+    info!(
+        listen = %args.listen,
+        workspace = %state.workspace.display(),
+        security_mode = ?state.security.mode,
+        version = env!("CARGO_PKG_VERSION"),
+        git_sha = env!("PC_BUILD_GIT_SHA"),
+        "pc listening"
+    );
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn log_http_request(request: Request, next: Next) -> Response {
+    let method = request.method().clone();
+    let path = request.uri().path().to_string();
+    let mcp_method = request
+        .headers()
+        .get("mcp-method")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("-")
+        .to_string();
+    let protocol_version = request
+        .headers()
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("-")
+        .to_string();
+    let started = Instant::now();
+
+    info!(
+        method = %method,
+        path = %path,
+        mcp_method = %mcp_method,
+        protocol_version = %protocol_version,
+        "http request"
+    );
+    let response = next.run(request).await;
+    info!(
+        method = %method,
+        path = %path,
+        mcp_method = %mcp_method,
+        protocol_version = %protocol_version,
+        status = %response.status(),
+        elapsed_ms = started.elapsed().as_millis(),
+        "http response"
+    );
+    response
 }
 
 fn parse_hosts(raw: &str) -> Vec<String> {

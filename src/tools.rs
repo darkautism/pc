@@ -498,7 +498,12 @@ impl ServerHandler for PcMcp {
     }
 
     fn get_info(&self) -> ServerConfig {
-        ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
+        ServerConfig::new(
+            ServerCapabilities::builder()
+                .enable_tools()
+                .enable_tool_list_changed()
+                .build(),
+        )
             .with_server_info(Implementation::from_build_env())
             .with_instructions(
                 format!("pc exposes exactly four coding tools: read, write, edit, and bash. Security mode is {:?}. In full mode, paths and bash use the host directly under OS permissions. In safe mode, each tool command self-reexecs through an embedded rootless Linux sandbox: Landlock when fully available, otherwise a rootless user/mount namespace allowlist, plus no-new-privileges and a seccomp denylist. Only the workspace, pc temp/home, required runtime paths, and optional explicit credential paths are visible. In readonly mode, write/edit/bash are disabled. bash never spends more than 10 seconds synchronously waiting for a command; when status=running, continue useful independent work and attach the returned pid later. Pipes/redirection are supported; curses/TTY programs are not. Every bash invocation writes combined stdout/stderr to a readable temp log.", self.state.security.mode),
