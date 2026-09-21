@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     collections::HashMap,
     fs::OpenOptions,
     path::{Path, PathBuf},
@@ -10,7 +11,10 @@ use std::{
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
-    model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerConfig},
+    model::{
+        CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities,
+        ServerConfig,
+    },
     schemars, tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
@@ -22,6 +26,7 @@ use crate::{AppState, config::SecurityMode};
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_OUTPUT_LINES: usize = 2000;
 const SYNC_WAIT: Duration = Duration::from_secs(10);
+const PC_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[ProtocolVersion::V_2026_07_28];
 
 #[derive(Clone, Default)]
 pub struct ProcessRegistry {
@@ -123,7 +128,14 @@ impl PcMcp {
 
     #[tool(
         name = "read",
-        description = "Read the contents of a file. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete."
+        description = "Read the contents of a file. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+        annotations(
+            title = "Read file",
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn read(
         &self,
@@ -190,7 +202,14 @@ impl PcMcp {
 
     #[tool(
         name = "write",
-        description = "Write content to a file. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Creates the file if it doesn't exist, overwrites if it does, and automatically creates parent directories."
+        description = "Write content to a file. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Creates the file if it doesn't exist, overwrites if it does, and automatically creates parent directories.",
+        annotations(
+            title = "Write file",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
     )]
     async fn write(
         &self,
@@ -226,7 +245,14 @@ impl PcMcp {
 
     #[tool(
         name = "edit",
-        description = "Make precise file edits with exact text replacement, including multiple disjoint edits in one call. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Each edits[].oldText must match exactly once in the original file."
+        description = "Make precise file edits with exact text replacement, including multiple disjoint edits in one call. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Each edits[].oldText must match exactly once in the original file.",
+        annotations(
+            title = "Edit file",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = false
+        )
     )]
     async fn edit(
         &self,
@@ -312,7 +338,14 @@ impl PcMcp {
 
     #[tool(
         name = "bash",
-        description = "Execute a non-interactive shell command in the configured workspace, or attach to a PID returned by a prior call. Unix uses bash; Windows uses cmd.exe. A command is synchronously awaited for at most 10 seconds. If still running, it is NOT killed: the tool returns its PID and asks you to do other independent work before attaching later. Attach also waits at most 10 seconds. stdout/stderr are combined; visible output is limited to the last 2000 lines or 50KB, with full output stored in the returned log path. Pipes and redirection are supported; interactive TTY/curses programs are not."
+        description = "Execute a non-interactive shell command in the configured workspace, or attach to a PID returned by a prior call. Unix uses bash; Windows uses cmd.exe. A command is synchronously awaited for at most 10 seconds. If still running, it is NOT killed: the tool returns its PID and asks you to do other independent work before attaching later. Attach also waits at most 10 seconds. stdout/stderr are combined; visible output is limited to the last 2000 lines or 50KB, with full output stored in the returned log path. Pipes and redirection are supported; interactive TTY/curses programs are not.",
+        annotations(
+            title = "Run shell command",
+            read_only_hint = false,
+            destructive_hint = true,
+            idempotent_hint = false,
+            open_world_hint = true
+        )
     )]
     async fn bash(
         &self,
@@ -460,6 +493,10 @@ impl PcMcp {
 
 #[tool_handler]
 impl ServerHandler for PcMcp {
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(PC_PROTOCOL_VERSIONS)
+    }
+
     fn get_info(&self) -> ServerConfig {
         ServerConfig::new(ServerCapabilities::builder().enable_tools().build())
             .with_server_info(Implementation::from_build_env())
@@ -587,6 +624,42 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn publishes_explicit_tool_safety_annotations() {
+        let read = PcMcp::read_tool_attr();
+        let read = read.annotations.expect("read annotations");
+        assert_eq!(read.read_only_hint, Some(true));
+        assert_eq!(read.destructive_hint, Some(false));
+        assert_eq!(read.idempotent_hint, Some(true));
+        assert_eq!(read.open_world_hint, Some(false));
+
+        let write = PcMcp::write_tool_attr();
+        let write = write.annotations.expect("write annotations");
+        assert_eq!(write.read_only_hint, Some(false));
+        assert_eq!(write.destructive_hint, Some(true));
+        assert_eq!(write.idempotent_hint, Some(true));
+        assert_eq!(write.open_world_hint, Some(false));
+
+        let edit = PcMcp::edit_tool_attr();
+        let edit = edit.annotations.expect("edit annotations");
+        assert_eq!(edit.read_only_hint, Some(false));
+        assert_eq!(edit.destructive_hint, Some(true));
+        assert_eq!(edit.idempotent_hint, Some(false));
+        assert_eq!(edit.open_world_hint, Some(false));
+
+        let bash = PcMcp::bash_tool_attr();
+        let bash = bash.annotations.expect("bash annotations");
+        assert_eq!(bash.read_only_hint, Some(false));
+        assert_eq!(bash.destructive_hint, Some(true));
+        assert_eq!(bash.idempotent_hint, Some(false));
+        assert_eq!(bash.open_world_hint, Some(true));
+    }
+
+    #[test]
+    fn advertises_chatgpt_discovery_protocol() {
+        assert_eq!(PC_PROTOCOL_VERSIONS, &[ProtocolVersion::V_2026_07_28]);
+    }
 
     #[tokio::test]
     async fn long_bash_detaches_then_attaches_same_pid() {

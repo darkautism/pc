@@ -282,6 +282,21 @@ fn mcp_http_config(public_url: Option<&str>) -> anyhow::Result<StreamableHttpSer
     }
     Ok(StreamableHttpServerConfig::default()
         .with_allowed_hosts(allowed_hosts)
-        .with_legacy_session_mode(true)
+        // ChatGPT's current connector lifecycle starts with server/discover.
+        // Keep pc on the 2026-07-28 stateless path instead of creating legacy sessions.
+        .with_legacy_session_mode(false)
+        .with_stateless_protocol_metadata_required(true)
         .with_json_response(true))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mcp_transport_uses_modern_stateless_discovery() {
+        let config = mcp_http_config(None).expect("MCP HTTP config");
+        assert!(!config.legacy_session_mode);
+        assert!(config.stateless_protocol_metadata_required);
+    }
 }
