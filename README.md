@@ -31,8 +31,6 @@ A normal installation does **not** use `/app/data`. On startup pc reads:
 ~/.config/pc/config.yaml
 ```
 
-If `XDG_CONFIG_HOME` is set, the path is `$XDG_CONFIG_HOME/pc/config.yaml`. `PC_HOME` can explicitly override the config directory.
-
 The user-facing config has five settings:
 
 ```yaml
@@ -121,4 +119,3 @@ docker run --rm -p 8787:8787 \
 
 The entrypoint validates these values and atomically rewrites `/app/data/config.yaml` before launching pc. The OAuth SQLite database is then derived from `PC_HOME` and stored at `/app/data/pc.db`.
 
-GitHub Actions builds `linux/amd64` and `linux/arm64` on native runners in parallel. Pull requests build both architectures without pushing. Pushes to `main` publish architecture-specific SHA images first, then create `ghcr.io/darkautism/pc:latest` and `ghcr.io/darkautism/pc:sha-<commit>` multi-architecture manifests.
