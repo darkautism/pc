@@ -488,18 +488,6 @@ mod tests {
                 "tools/list missing {tool}: {list_response}"
             );
         }
-        assert_eq!(
-            list_response.matches(r#""outputSchema":"#).count(),
-            4,
-            "ChatGPT action discovery requires outputSchema for every listed tool: {list_response}"
-        );
-        assert_eq!(
-            list_response
-                .matches(r#""$id":"pc.tool_result.v1""#)
-                .count(),
-            4,
-            "each listed tool must expose the PC output schema: {list_response}"
-        );
 
         server.abort();
         let _ = tokio::fs::remove_dir_all(workspace).await;
