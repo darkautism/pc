@@ -132,6 +132,7 @@ impl PcMcp {
         name = "read",
         title = "Read file",
         description = "Read the contents of a file. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+        output_schema = pc_tool_output_schema(),
         annotations(
             title = "Read file",
             read_only_hint = true,
@@ -207,6 +208,7 @@ impl PcMcp {
         name = "write",
         title = "Write file",
         description = "Write content to a file. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Creates the file if it doesn't exist, overwrites if it does, and automatically creates parent directories.",
+        output_schema = pc_tool_output_schema(),
         annotations(
             title = "Write file",
             read_only_hint = false,
@@ -251,6 +253,7 @@ impl PcMcp {
         name = "edit",
         title = "Edit file",
         description = "Make precise file edits with exact text replacement, including multiple disjoint edits in one call. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Each edits[].oldText must match exactly once in the original file.",
+        output_schema = pc_tool_output_schema(),
         annotations(
             title = "Edit file",
             read_only_hint = false,
@@ -345,6 +348,7 @@ impl PcMcp {
         name = "bash",
         title = "Run shell command",
         description = "Execute a non-interactive shell command in the configured workspace, or attach to a PID returned by a prior call. Unix uses bash; Windows uses cmd.exe. A command is synchronously awaited for at most 10 seconds. If still running, it is NOT killed: the tool returns its PID and asks you to do other independent work before attaching later. Attach also waits at most 10 seconds. stdout/stderr are combined; visible output is limited to the last 2000 lines or 50KB, with full output stored in the returned log path. Pipes and redirection are supported; interactive TTY/curses programs are not.",
+        output_schema = pc_tool_output_schema(),
         annotations(
             title = "Run shell command",
             read_only_hint = false,
@@ -643,8 +647,34 @@ async fn bounded_tail(path: &Path) -> Result<(String, bool), McpError> {
     Ok((output, true))
 }
 
+fn pc_tool_output_schema() -> Arc<rmcp::model::JsonObject> {
+    Arc::new(
+        serde_json::from_value(serde_json::json!({
+            "$id": "pc.tool_result.v1",
+            "type": "object",
+            "properties": {
+                "text": { "type": "string" }
+            },
+            "required": ["text"],
+            "additionalProperties": false
+        }))
+        .expect("static PC tool output schema is valid"),
+    )
+}
+
 fn text_result(text: impl Into<String>) -> CallToolResult {
-    CallToolResult::success(vec![ContentBlock::text(text.into())])
+    let text = text.into();
+    let mut result = CallToolResult::structured(serde_json::json!({ "text": text }));
+    result.content = vec![ContentBlock::text(
+        result
+            .structured_content
+            .as_ref()
+            .and_then(|value| value.get("text"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string(),
+    )];
+    result
 }
 
 fn json_result(value: &impl Serialize) -> Result<CallToolResult, McpError> {
@@ -661,6 +691,27 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+
+    #[test]
+    fn publishes_output_schema_for_chatgpt_action_discovery() {
+        for tool in [
+            PcMcp::read_tool_attr(),
+            PcMcp::write_tool_attr(),
+            PcMcp::edit_tool_attr(),
+            PcMcp::bash_tool_attr(),
+        ] {
+            let schema = tool
+                .output_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} is missing outputSchema", tool.name));
+            assert_eq!(
+                schema.get("$id").and_then(serde_json::Value::as_str),
+                Some("pc.tool_result.v1"),
+                "{} has the wrong outputSchema",
+                tool.name
+            );
+        }
+    }
 
     #[test]
     fn publishes_explicit_tool_safety_annotations() {
