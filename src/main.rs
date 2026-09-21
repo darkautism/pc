@@ -465,6 +465,14 @@ mod tests {
             discover_response.contains("2026-07-28"),
             "discover did not advertise modern protocol: {discover_response}"
         );
+        assert!(
+            discover_response.contains(r#""cacheScope":"public""#),
+            "discover must match MCPX/go-sdk public cache scope: {discover_response}"
+        );
+        assert!(
+            discover_response.contains(r#""name":"pc""#),
+            "discover must identify pc rather than the rmcp library: {discover_response}"
+        );
 
         // This intentionally has no per-request _meta. MCPX accepts this shape,
         // and ChatGPT's automatic action scan uses it immediately after discover.

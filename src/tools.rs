@@ -12,10 +12,12 @@ use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CallToolResult, ContentBlock, Implementation, ProtocolVersion, ServerCapabilities,
-        ServerConfig,
+        CacheScope, CallToolResult, ContentBlock, DiscoverResult, Implementation, ProtocolVersion,
+        ServerCapabilities, ServerConfig, SubscriptionFilter,
     },
-    schemars, tool, tool_handler, tool_router,
+    schemars,
+    service::{RequestContext, SubscriptionContext},
+    tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Notify, RwLock};
@@ -508,10 +510,36 @@ impl ServerHandler for PcMcp {
                 .enable_tool_list_changed()
                 .build(),
         )
-            .with_server_info(Implementation::from_build_env())
-            .with_instructions(
-                format!("pc exposes exactly four coding tools: read, write, edit, and bash. Security mode is {:?}. In full mode, paths and bash use the host directly under OS permissions. In safe mode, each tool command self-reexecs through an embedded rootless Linux sandbox: Landlock when fully available, otherwise a rootless user/mount namespace allowlist, plus no-new-privileges and a seccomp denylist. Only the workspace, pc temp/home, required runtime paths, and optional explicit credential paths are visible. In readonly mode, write/edit/bash are disabled. bash never spends more than 10 seconds synchronously waiting for a command; when status=running, continue useful independent work and attach the returned pid later. Pipes/redirection are supported; curses/TTY programs are not. Every bash invocation writes combined stdout/stderr to a readable temp log.", self.state.security.mode),
-            )
+        .with_server_info(Implementation::new("pc", env!("CARGO_PKG_VERSION")))
+        .with_instructions(
+            format!("pc exposes exactly four coding tools: read, write, edit, and bash. Security mode is {:?}. In full mode, paths and bash use the host directly under OS permissions. In safe mode, each tool command self-reexecs through an embedded rootless Linux sandbox: Landlock when fully available, otherwise a rootless user/mount namespace allowlist, plus no-new-privileges and a seccomp denylist. Only the workspace, pc temp/home, required runtime paths, and optional explicit credential paths are visible. In readonly mode, write/edit/bash are disabled. bash never spends more than 10 seconds synchronously waiting for a command; when status=running, continue useful independent work and attach the returned pid later. Pipes/redirection are supported; curses/TTY programs are not. Every bash invocation writes combined stdout/stderr to a readable temp log.", self.state.security.mode),
+        )
+    }
+
+    fn discover(
+        &self,
+        _context: RequestContext<rmcp::RoleServer>,
+    ) -> impl std::future::Future<Output = Result<DiscoverResult, McpError>> + Send + '_ {
+        let result = DiscoverResult::from_server_info(
+            self.supported_protocol_versions().into_owned(),
+            self.get_info(),
+        )
+        // Match MCPX/go-sdk's connect-time discovery contract. ChatGPT uses
+        // this response to decide whether to perform the automatic action scan.
+        .with_cache_scope(CacheScope::Public);
+        std::future::ready(Ok(result))
+    }
+
+    fn accepted_subscription_filter(
+        &self,
+        requested: &SubscriptionFilter,
+    ) -> Option<SubscriptionFilter> {
+        Some(requested.supported_by(&self.get_info().capabilities))
+    }
+
+    async fn listen(&self, context: SubscriptionContext) -> Result<(), McpError> {
+        context.cancelled().await;
+        Ok(())
     }
 }
 
