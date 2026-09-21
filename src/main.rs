@@ -193,7 +193,7 @@ async fn async_main() -> anyhow::Result<()> {
                     production: state.production,
                     allowed_hosts: state.allowed_redirect_hosts.clone(),
                 },
-                client_id_metadata_document_supported: false,
+                client_id_metadata_document_supported: true,
             },
         )
         .await
