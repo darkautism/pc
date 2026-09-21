@@ -3,9 +3,11 @@ use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
 use anyhow::{Context, ensure};
 use axum::{
     Router,
+    body::{Body, to_bytes},
     extract::{DefaultBodyLimit, Request},
+    http::header,
     middleware::{self, Next},
-    response::Response,
+    response::{IntoResponse, Response},
 };
 use clap::Parser;
 use rmcp::transport::streamable_http_server::{
@@ -223,7 +225,8 @@ async fn async_main() -> anyhow::Result<()> {
         .route_layer(middleware::from_fn_with_state(
             oauth_state.clone(),
             oauth::require_mcp_auth,
-        ));
+        ))
+        .route_layer(middleware::from_fn(normalize_chatgpt_action_scan));
 
     let app = Router::new()
         .merge(oauth::router(oauth_state.clone()))
@@ -244,6 +247,63 @@ async fn async_main() -> anyhow::Result<()> {
     );
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+async fn normalize_chatgpt_action_scan(request: Request, next: Next) -> Response {
+    let is_tools_list = request
+        .headers()
+        .get("mcp-method")
+        .and_then(|value| value.to_str().ok())
+        == Some("tools/list");
+    if !is_tools_list {
+        return next.run(request).await;
+    }
+
+    let protocol_version = request
+        .headers()
+        .get("mcp-protocol-version")
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("2026-07-28")
+        .to_string();
+
+    let (mut parts, body) = request.into_parts();
+    let Ok(bytes) = to_bytes(body, 1024 * 1024).await else {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            "invalid tools/list request body",
+        )
+            .into_response();
+    };
+    let Ok(mut payload) = serde_json::from_slice::<serde_json::Value>(&bytes) else {
+        let request = Request::from_parts(parts, Body::from(bytes));
+        return next.run(request).await;
+    };
+
+    if let Some(params) = payload
+        .as_object_mut()
+        .and_then(|root| root.get_mut("params"))
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        let meta = params
+            .entry("_meta")
+            .or_insert_with(|| serde_json::json!({}));
+        if let Some(meta) = meta.as_object_mut() {
+            meta.entry("io.modelcontextprotocol/protocolVersion")
+                .or_insert_with(|| serde_json::Value::String(protocol_version));
+            meta.entry("io.modelcontextprotocol/clientCapabilities")
+                .or_insert_with(|| serde_json::json!({}));
+        }
+    }
+
+    let Ok(rewritten) = serde_json::to_vec(&payload) else {
+        let request = Request::from_parts(parts, Body::from(bytes));
+        return next.run(request).await;
+    };
+    if let Ok(value) = header::HeaderValue::from_str(&rewritten.len().to_string()) {
+        parts.headers.insert(header::CONTENT_LENGTH, value);
+    }
+    next.run(Request::from_parts(parts, Body::from(rewritten)))
+        .await
 }
 
 async fn log_http_request(request: Request, next: Next) -> Response {
@@ -337,21 +397,112 @@ fn mcp_http_config(public_url: Option<&str>) -> anyhow::Result<StreamableHttpSer
     }
     Ok(StreamableHttpServerConfig::default()
         .with_allowed_hosts(allowed_hosts)
-        // ChatGPT's current connector lifecycle starts with server/discover.
-        // Keep pc on the 2026-07-28 stateless path instead of creating legacy sessions.
+        // Match the ChatGPT-compatible MCPX transport: keep requests stateless,
+        // but do not require per-request protocol metadata on ordinary tools/list.
+        // ChatGPT's automatic action scan sends a plain tools/list after discovery.
         .with_legacy_session_mode(false)
-        .with_stateless_protocol_metadata_required(true)
+        .with_stateless_protocol_metadata_required(false)
         .with_json_response(true))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[test]
     fn mcp_transport_uses_modern_stateless_discovery() {
         let config = mcp_http_config(None).expect("MCP HTTP config");
         assert!(!config.legacy_session_mode);
-        assert!(config.stateless_protocol_metadata_required);
+        assert!(
+            !config.stateless_protocol_metadata_required,
+            "automatic ChatGPT tools/list must not require per-request _meta"
+        );
+    }
+
+    #[tokio::test]
+    async fn chatgpt_action_discovery_accepts_plain_tools_list_after_discover() {
+        let workspace =
+            std::env::temp_dir().join(format!("pc-action-discovery-{}", uuid::Uuid::new_v4()));
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .expect("create workspace");
+
+        let state = Arc::new(AppState {
+            public_url: None,
+            oauth_password: None,
+            workspace: workspace.clone(),
+            security: crate::config::SecurityConfig::default(),
+            sandbox: None,
+            allowed_redirect_hosts: Vec::new(),
+            production: false,
+            processes: ProcessRegistry::default(),
+        });
+        let service_state = state.clone();
+        let service = StreamableHttpService::new(
+            move || Ok(PcMcp::new(service_state.clone())),
+            LocalSessionManager::default().into(),
+            mcp_http_config(None).expect("MCP HTTP config"),
+        );
+        let app = Router::new()
+            .route_service("/mcp", service)
+            .route_layer(middleware::from_fn(normalize_chatgpt_action_scan));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind");
+        let addr = listener.local_addr().expect("local addr");
+        let server = tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve");
+        });
+
+        let discover = r#"{"jsonrpc":"2.0","id":"d1","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"chatgpt-action-scan","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}"#;
+        let discover_response = raw_mcp_post(addr, "server/discover", discover).await;
+        assert!(
+            discover_response.starts_with("HTTP/1.1 200"),
+            "discover failed: {discover_response}"
+        );
+        assert!(
+            discover_response.contains("2026-07-28"),
+            "discover did not advertise modern protocol: {discover_response}"
+        );
+
+        // This intentionally has no per-request _meta. MCPX accepts this shape,
+        // and ChatGPT's automatic action scan uses it immediately after discover.
+        let list = r#"{"jsonrpc":"2.0","id":"d2","method":"tools/list","params":{}}"#;
+        let list_response = raw_mcp_post(addr, "tools/list", list).await;
+        assert!(
+            list_response.starts_with("HTTP/1.1 200"),
+            "automatic tools/list failed: {list_response}"
+        );
+        for tool in ["read", "write", "edit", "bash"] {
+            assert!(
+                list_response.contains(&format!(r#""name":"{tool}""#)),
+                "tools/list missing {tool}: {list_response}"
+            );
+        }
+
+        server.abort();
+        let _ = tokio::fs::remove_dir_all(workspace).await;
+    }
+
+    async fn raw_mcp_post(addr: SocketAddr, method: &str, body: &str) -> String {
+        let mut stream = tokio::net::TcpStream::connect(addr)
+            .await
+            .expect("connect test server");
+        let request = format!(
+            "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: {method}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .expect("write request");
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .expect("read response");
+        String::from_utf8(response).expect("HTTP response is UTF-8")
     }
 }

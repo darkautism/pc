@@ -208,7 +208,7 @@ impl PcMcp {
         annotations(
             title = "Write file",
             read_only_hint = false,
-            destructive_hint = false,
+            destructive_hint = true,
             idempotent_hint = true,
             open_world_hint = false
         )
@@ -252,8 +252,8 @@ impl PcMcp {
         annotations(
             title = "Edit file",
             read_only_hint = false,
-            destructive_hint = false,
-            idempotent_hint = true,
+            destructive_hint = true,
+            idempotent_hint = false,
             open_world_hint = false
         )
     )]
@@ -346,7 +346,7 @@ impl PcMcp {
         annotations(
             title = "Run shell command",
             read_only_hint = false,
-            destructive_hint = false,
+            destructive_hint = true,
             idempotent_hint = false,
             open_world_hint = true
         )
@@ -648,7 +648,7 @@ mod tests {
         assert_eq!(write.title.as_deref(), Some("Write file"));
         let write = write.annotations.expect("write annotations");
         assert_eq!(write.read_only_hint, Some(false));
-        assert_eq!(write.destructive_hint, Some(false));
+        assert_eq!(write.destructive_hint, Some(true));
         assert_eq!(write.idempotent_hint, Some(true));
         assert_eq!(write.open_world_hint, Some(false));
 
@@ -656,15 +656,15 @@ mod tests {
         assert_eq!(edit.title.as_deref(), Some("Edit file"));
         let edit = edit.annotations.expect("edit annotations");
         assert_eq!(edit.read_only_hint, Some(false));
-        assert_eq!(edit.destructive_hint, Some(false));
-        assert_eq!(edit.idempotent_hint, Some(true));
+        assert_eq!(edit.destructive_hint, Some(true));
+        assert_eq!(edit.idempotent_hint, Some(false));
         assert_eq!(edit.open_world_hint, Some(false));
 
         let bash = PcMcp::bash_tool_attr();
         assert_eq!(bash.title.as_deref(), Some("Run shell command"));
         let bash = bash.annotations.expect("bash annotations");
         assert_eq!(bash.read_only_hint, Some(false));
-        assert_eq!(bash.destructive_hint, Some(false));
+        assert_eq!(bash.destructive_hint, Some(true));
         assert_eq!(bash.idempotent_hint, Some(false));
         assert_eq!(bash.open_world_hint, Some(true));
     }
