@@ -13,9 +13,9 @@ use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CacheScope, CallToolResult, ContentBlock, DiscoverResult, Implementation, ListToolsResult,
-        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
-        SubscriptionFilter,
+        Annotations, CacheScope, CallToolResult, ContentBlock, DiscoverResult, EmbeddedResource,
+        Implementation, ListToolsResult, PaginatedRequestParams, ProtocolVersion, ResourceContents,
+        Role, ServerCapabilities, ServerConfig, SubscriptionFilter,
     },
     schemars,
     service::{RequestContext, SubscriptionContext},
@@ -215,9 +215,23 @@ impl PcMcp {
             };
             let metadata = serde_json::to_string(&structured)
                 .map_err(|e| tool_error(format!("serialize read result: {e}")))?;
+            let encoded = STANDARD.encode(&bytes);
+            let resource = EmbeddedResource::new(
+                ResourceContents::blob(
+                    encoded.clone(),
+                    format!("pc://read-image/{}", Uuid::new_v4()),
+                )
+                .with_mime_type(mime_type),
+            )
+            .with_annotations(
+                Annotations::default()
+                    .with_audience(vec![Role::Assistant, Role::User])
+                    .with_priority(1.0),
+            );
             return Ok(CallToolResult::success(vec![
                 ContentBlock::text(metadata),
-                ContentBlock::image(STANDARD.encode(&bytes), mime_type),
+                ContentBlock::image(encoded.clone(), mime_type),
+                ContentBlock::Resource(resource),
             ]));
         }
 
@@ -906,7 +920,7 @@ mod tests {
             .await
             .expect("read image");
 
-        assert_eq!(result.content.len(), 2);
+        assert_eq!(result.content.len(), 3);
         assert!(
             result.content[0]
                 .as_text()
@@ -917,6 +931,31 @@ mod tests {
             .expect("second content block must be an image");
         assert_eq!(image.mime_type, "image/png");
         assert_eq!(image.data, STANDARD.encode(image_bytes));
+        let resource = result.content[2]
+            .as_resource()
+            .expect("third content block must be an embedded resource");
+        match &resource.resource {
+            ResourceContents::BlobResourceContents {
+                uri,
+                mime_type,
+                blob,
+                ..
+            } => {
+                assert!(uri.starts_with("pc://read-image/"));
+                assert_eq!(mime_type.as_deref(), Some("image/png"));
+                assert_eq!(blob, &STANDARD.encode(image_bytes));
+            }
+            _ => panic!("embedded resource must contain a blob"),
+        }
+        let annotations = resource
+            .annotations
+            .as_ref()
+            .expect("embedded resource must carry annotations");
+        assert_eq!(annotations.priority, Some(1.0));
+        assert_eq!(
+            annotations.audience,
+            Some(vec![Role::Assistant, Role::User])
+        );
         assert_eq!(result.structured_content, None);
 
         let _ = tokio::fs::remove_dir_all(workspace).await;
