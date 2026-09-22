@@ -75,12 +75,30 @@ pub struct ReadParams {
     pub limit: Option<usize>,
 }
 
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct ReadOutput {
+    kind: String,
+    path: String,
+    mime_type: Option<String>,
+    bytes: usize,
+    truncated: bool,
+    next_offset: Option<usize>,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WriteParams {
     #[schemars(description = "Path to the file to write (relative or absolute)")]
     pub path: String,
     #[schemars(description = "Content to write to the file")]
     pub content: String,
+}
+
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct WriteOutput {
+    path: String,
+    bytes: usize,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -105,6 +123,14 @@ pub struct EditParams {
     pub edits: Vec<ReplaceEdit>,
 }
 
+#[derive(Debug, Serialize, schemars::JsonSchema)]
+#[serde(rename_all = "camelCase")]
+struct EditOutput {
+    path: String,
+    edits_applied: usize,
+    bytes: usize,
+}
+
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct BashParams {
     #[schemars(
@@ -117,7 +143,7 @@ pub struct BashParams {
     pub pid: Option<u32>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, schemars::JsonSchema)]
 struct BashResult {
     status: &'static str,
     pid: u32,
@@ -141,6 +167,7 @@ impl PcMcp {
         name = "read",
         title = "Read file",
         description = "Read a file. PNG, JPEG, WebP, and GIF files are returned as native MCP image content so vision-capable clients can inspect them directly. Other files are read as UTF-8 text. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Text output is truncated to 2000 lines or 50KB (whichever is hit first); use offset/limit to continue large text files. offset/limit are ignored for recognized images.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<ReadOutput>(),
         annotations(
             title = "Read file",
             read_only_hint = true,
@@ -173,6 +200,7 @@ impl PcMcp {
                     .map_err(|e| tool_error(format!("read {}: {e}", input.path)))?
             }
         };
+        let total_bytes = bytes.len();
         if let Some(mime_type) = image_mime_type(&bytes) {
             if bytes.len() > MAX_IMAGE_BYTES {
                 return Err(tool_error(format!(
@@ -187,11 +215,17 @@ impl PcMcp {
                 ContentBlock::text(metadata),
                 ContentBlock::image(STANDARD.encode(&bytes), mime_type),
             ]);
-            result.structured_content = Some(serde_json::json!({
-                "path": input.path,
-                "mimeType": mime_type,
-                "bytes": bytes.len(),
-            }));
+            result.structured_content = Some(
+                serde_json::to_value(ReadOutput {
+                    kind: "image".to_string(),
+                    path: input.path,
+                    mime_type: Some(mime_type.to_string()),
+                    bytes: total_bytes,
+                    truncated: false,
+                    next_offset: None,
+                })
+                .map_err(|e| tool_error(format!("serialize read result: {e}")))?,
+            );
             return Ok(result);
         }
 
@@ -224,20 +258,36 @@ impl PcMcp {
             output_lines += 1;
         }
 
-        if truncated {
+        let next_offset = if truncated {
             let next = start + output_lines + 1;
             output.push_str(&format!(
                 "\n\n[Output truncated. Continue reading with offset={next}.]"
             ));
-        }
+            Some(next)
+        } else {
+            None
+        };
 
-        Ok(text_result(output))
+        let mut result = text_result(output);
+        result.structured_content = Some(
+            serde_json::to_value(ReadOutput {
+                kind: "text".to_string(),
+                path: input.path,
+                mime_type: Some("text/plain; charset=utf-8".to_string()),
+                bytes: total_bytes,
+                truncated,
+                next_offset,
+            })
+            .map_err(|e| tool_error(format!("serialize read result: {e}")))?,
+        );
+        Ok(result)
     }
 
     #[tool(
         name = "write",
         title = "Write file",
         description = "Write content to a file. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Creates the file if it doesn't exist, overwrites if it does, and automatically creates parent directories.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<WriteOutput>(),
         annotations(
             title = "Write file",
             read_only_hint = false,
@@ -254,6 +304,7 @@ impl PcMcp {
             return Err(tool_error("write is disabled in readonly mode"));
         }
         let path = resolve_path(&self.state.workspace, &input.path);
+        let bytes = input.content.len();
         match self.state.security.mode {
             SecurityMode::Safe => self
                 .state
@@ -275,13 +326,18 @@ impl PcMcp {
             }
             SecurityMode::Readonly => unreachable!(),
         }
-        Ok(text_result(format!("Successfully wrote to {}", input.path)))
+        let output = WriteOutput {
+            path: input.path.clone(),
+            bytes,
+        };
+        structured_text_result(format!("Successfully wrote to {}", input.path), &output)
     }
 
     #[tool(
         name = "edit",
         title = "Edit file",
         description = "Make precise file edits with exact text replacement, including multiple disjoint edits in one call. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Each edits[].oldText must match exactly once in the original file.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<EditOutput>(),
         annotations(
             title = "Edit file",
             read_only_hint = false,
@@ -351,6 +407,7 @@ impl PcMcp {
             updated.replace_range(start..end, &new_text);
         }
 
+        let updated_bytes = updated.len();
         match self.state.security.mode {
             SecurityMode::Safe => self
                 .state
@@ -365,17 +422,26 @@ impl PcMcp {
                 .map_err(|e| tool_error(format!("write {}: {e}", input.path)))?,
             SecurityMode::Readonly => unreachable!(),
         }
-        Ok(text_result(format!(
-            "Successfully applied {} edit(s) to {}",
-            input.edits.len(),
-            input.path
-        )))
+        let output = EditOutput {
+            path: input.path.clone(),
+            edits_applied: input.edits.len(),
+            bytes: updated_bytes,
+        };
+        structured_text_result(
+            format!(
+                "Successfully applied {} edit(s) to {}",
+                input.edits.len(),
+                input.path
+            ),
+            &output,
+        )
     }
 
     #[tool(
         name = "bash",
         title = "Run shell command",
         description = "Execute a non-interactive shell command in the configured workspace, or attach to a PID returned by a prior call. Unix uses bash; Windows uses cmd.exe. A command is synchronously awaited for at most 10 seconds. If still running, it is NOT killed: the tool returns its PID and asks you to do other independent work before attaching later. Attach also waits at most 10 seconds. stdout/stderr are combined; visible output is limited to the last 2000 lines or 50KB, with full output stored in the returned log path. Pipes and redirection are supported; interactive TTY/curses programs are not.",
+        output_schema = rmcp::handler::server::tool::schema_for_type::<BashResult>(),
         annotations(
             title = "Run shell command",
             read_only_hint = false,
@@ -715,9 +781,19 @@ fn text_result(text: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text.into())])
 }
 
+fn structured_text_result(
+    text: impl Into<String>,
+    value: &impl Serialize,
+) -> Result<CallToolResult, McpError> {
+    let mut result = text_result(text);
+    result.structured_content =
+        Some(serde_json::to_value(value).map_err(|e| tool_error(e.to_string()))?);
+    Ok(result)
+}
+
 fn json_result(value: &impl Serialize) -> Result<CallToolResult, McpError> {
     let text = serde_json::to_string_pretty(value).map_err(|e| tool_error(e.to_string()))?;
-    Ok(text_result(text))
+    structured_text_result(text, value)
 }
 
 fn tool_error(message: impl Into<String>) -> McpError {
@@ -780,17 +856,23 @@ mod tests {
     }
 
     #[test]
-    fn keeps_tools_list_lean_for_chatgpt_discovery() {
+    fn publishes_compact_output_schemas_for_all_tools() {
         for tool in [
             PcMcp::read_tool_attr(),
             PcMcp::write_tool_attr(),
             PcMcp::edit_tool_attr(),
             PcMcp::bash_tool_attr(),
         ] {
+            let schema = tool
+                .output_schema
+                .as_ref()
+                .unwrap_or_else(|| panic!("{} must expose outputSchema", tool.name));
+            let schema_json = serde_json::to_string(schema).expect("serialize tool output schema");
             assert!(
-                tool.output_schema.is_none(),
-                "{} must not expose outputSchema during ChatGPT discovery",
-                tool.name
+                schema_json.len() < 4096,
+                "{} outputSchema must remain compact; got {} bytes",
+                tool.name,
+                schema_json.len()
             );
         }
     }
@@ -852,9 +934,12 @@ mod tests {
         assert_eq!(
             result.structured_content,
             Some(serde_json::json!({
+                "kind": "image",
                 "path": "test.png",
                 "mimeType": "image/png",
                 "bytes": image_bytes.len(),
+                "truncated": false,
+                "nextOffset": null,
             }))
         );
 
