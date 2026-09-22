@@ -78,12 +78,10 @@ pub struct ReadParams {
 #[derive(Debug, Serialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]
 struct ReadOutput {
-    kind: String,
-    path: String,
-    mime_type: Option<String>,
+    #[serde(rename = "mimeType")]
+    mime_type: String,
     bytes: usize,
-    truncated: bool,
-    next_offset: Option<usize>,
+    path: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -210,22 +208,20 @@ impl PcMcp {
                 )));
             }
 
-            let metadata = format!("{} — {mime_type}, {} bytes", input.path, bytes.len());
+            let structured = ReadOutput {
+                mime_type: mime_type.to_string(),
+                bytes: total_bytes,
+                path: input.path,
+            };
+            let structured_value = serde_json::to_value(&structured)
+                .map_err(|e| tool_error(format!("serialize read result: {e}")))?;
+            let metadata = serde_json::to_string(&structured)
+                .map_err(|e| tool_error(format!("serialize read result: {e}")))?;
             let mut result = CallToolResult::success(vec![
                 ContentBlock::text(metadata),
                 ContentBlock::image(STANDARD.encode(&bytes), mime_type),
             ]);
-            result.structured_content = Some(
-                serde_json::to_value(ReadOutput {
-                    kind: "image".to_string(),
-                    path: input.path,
-                    mime_type: Some(mime_type.to_string()),
-                    bytes: total_bytes,
-                    truncated: false,
-                    next_offset: None,
-                })
-                .map_err(|e| tool_error(format!("serialize read result: {e}")))?,
-            );
+            result.structured_content = Some(structured_value);
             return Ok(result);
         }
 
@@ -258,25 +254,19 @@ impl PcMcp {
             output_lines += 1;
         }
 
-        let next_offset = if truncated {
+        if truncated {
             let next = start + output_lines + 1;
             output.push_str(&format!(
                 "\n\n[Output truncated. Continue reading with offset={next}.]"
             ));
-            Some(next)
-        } else {
-            None
-        };
+        }
 
         let mut result = text_result(output);
         result.structured_content = Some(
             serde_json::to_value(ReadOutput {
-                kind: "text".to_string(),
-                path: input.path,
-                mime_type: Some("text/plain; charset=utf-8".to_string()),
+                mime_type: "text/plain; charset=utf-8".to_string(),
                 bytes: total_bytes,
-                truncated,
-                next_offset,
+                path: input.path,
             })
             .map_err(|e| tool_error(format!("serialize read result: {e}")))?,
         );
@@ -934,12 +924,9 @@ mod tests {
         assert_eq!(
             result.structured_content,
             Some(serde_json::json!({
-                "kind": "image",
-                "path": "test.png",
                 "mimeType": "image/png",
                 "bytes": image_bytes.len(),
-                "truncated": false,
-                "nextOffset": null,
+                "path": "test.png",
             }))
         );
 
