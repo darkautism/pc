@@ -29,7 +29,6 @@ pub enum ServiceAction {
 #[derive(Debug)]
 struct ServiceSpec {
     binary: PathBuf,
-    pc_home: PathBuf,
     user_home: PathBuf,
     environment: Vec<(String, String)>,
 }
@@ -76,7 +75,6 @@ impl ServiceSpec {
 
         Ok(Self {
             binary,
-            pc_home,
             user_home,
             environment,
         })
@@ -124,7 +122,7 @@ fn service_environment(pc_home: &Path) -> Vec<(String, String)> {
 
 fn validate_line_value(name: &str, value: &str) -> anyhow::Result<()> {
     ensure!(
-        !value.contains(['\n', '\r', '\0']),
+        !value.contains('\n') && !value.contains('\r') && !value.contains('\0'),
         "{name} contains unsupported control characters"
     );
     Ok(())
@@ -167,8 +165,8 @@ fn run_ignoring_status(command: &mut Command) {
 
 fn systemd_escape(value: &str) -> String {
     value
-        .replace('\\', "\\\\")
-        .replace('"', "\\"")
+        .replace('\\', r#"\\"#)
+        .replace('"', r#"\""#)
         .replace('%', "%%")
 }
 
@@ -415,7 +413,6 @@ mod tests {
     fn spec() -> ServiceSpec {
         ServiceSpec {
             binary: PathBuf::from("/Users/dev/bin/pc"),
-            pc_home: PathBuf::from("/Users/dev/.config/pc"),
             user_home: PathBuf::from("/Users/dev"),
             environment: vec![
                 (
