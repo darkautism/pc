@@ -10,9 +10,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use image::{
-    DynamicImage, GenericImageView, ImageFormat, codecs::jpeg::JpegEncoder, imageops::FilterType,
-};
+use image::{GenericImageView, ImageFormat, codecs::jpeg::JpegEncoder, imageops::FilterType};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -995,7 +993,7 @@ mod tests {
     }
 
     fn encode_test_png(width: u32, height: u32) -> Vec<u8> {
-        let image = DynamicImage::new_rgb8(width, height);
+        let image = image::DynamicImage::new_rgb8(width, height);
         let mut cursor = Cursor::new(Vec::new());
         image
             .write_to(&mut cursor, ImageFormat::Png)
