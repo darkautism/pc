@@ -1,8 +1,8 @@
 use std::{
     borrow::Cow,
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::OpenOptions,
-    io::Cursor,
+    io::{Cursor, SeekFrom},
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -24,7 +24,10 @@ use rmcp::{
     tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
-use tokio::sync::{Notify, RwLock};
+use tokio::{
+    io::{AsyncReadExt, AsyncSeekExt},
+    sync::RwLock,
+};
 use uuid::Uuid;
 
 use crate::{AppState, config::SecurityMode};
@@ -34,7 +37,10 @@ const MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024;
 const MAX_IMAGE_PREVIEW_EDGE: u32 = 2048;
 const IMAGE_PREVIEW_JPEG_QUALITY: u8 = 85;
 const MAX_OUTPUT_LINES: usize = 2000;
-const SYNC_WAIT: Duration = Duration::from_secs(10);
+const MAX_TAIL_READ_BYTES: u64 = 128 * 1024;
+const SYNC_WAIT: Duration = Duration::from_secs(2);
+const LOG_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+const MAX_LOG_DIR_BYTES: u64 = 256 * 1024 * 1024;
 const PC_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
     ProtocolVersion::V_2026_07_28,
     ProtocolVersion::V_2025_11_25,
@@ -53,7 +59,6 @@ struct ProcessEntry {
     log_path: PathBuf,
     visible_log_path: String,
     state: RwLock<ProcessState>,
-    notify: Notify,
 }
 
 #[derive(Clone, Copy)]
@@ -459,7 +464,7 @@ impl PcMcp {
     #[tool(
         name = "bash",
         title = "Run shell command",
-        description = "Run command or attach pid. Wait <=10s; long jobs continue. Output <=2000 lines/50KB; full log path returned.",
+        description = "Run command or attach pid. Wait <=2s; long jobs continue. Attach is immediate. Output <=2000 lines/50KB; full log path returned.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<BashResult>(),
         annotations(
             read_only_hint = false,
@@ -493,6 +498,7 @@ impl PcMcp {
         tokio::fs::create_dir_all(&log_dir)
             .await
             .map_err(|e| tool_error(format!("create command log directory: {e}")))?;
+        cleanup_task_logs(&log_dir, &self.state.processes).await?;
         let file_name = format!("{}.log", Uuid::new_v4());
         let log_path = log_dir.join(&file_name);
         let visible_log_path = visible_log_dir
@@ -534,7 +540,6 @@ impl PcMcp {
                 finished: false,
                 exit_code: None,
             }),
-            notify: Notify::new(),
         });
         self.state
             .processes
@@ -571,10 +576,6 @@ impl PcMcp {
             .cloned()
             .ok_or_else(|| tool_error(format!("unknown pid {pid}")))?;
 
-        let notified = entry.notify.notified();
-        if !entry.state.read().await.finished {
-            let _ = tokio::time::timeout(SYNC_WAIT, notified).await;
-        }
         self.process_result(&entry).await
     }
 
@@ -591,11 +592,9 @@ impl PcMcp {
                 output,
                 full_output_path: Some(full_path),
                 truncated,
-                instruction: Some(
-                    "This task is taking longer than 10 seconds. Continue with other independent work and attach this pid later. Do not immediately wait on it again unless its result is now required.",
-                ),
+                instruction: Some("Still running. Continue other work and attach this pid later."),
             };
-            return json_result(&result);
+            return bash_result(result);
         }
 
         let result = BashResult {
@@ -608,7 +607,7 @@ impl PcMcp {
             instruction: None,
         };
 
-        json_result(&result)
+        bash_result(result)
     }
 }
 
@@ -626,9 +625,10 @@ impl ServerHandler for PcMcp {
                 .build(),
         )
         .with_server_info(Implementation::new("pc", env!("CARGO_PKG_VERSION")))
-        .with_instructions(
-            format!("pc exposes exactly four coding tools: read, write, edit, and bash. Security mode is {:?}. In full mode, paths and bash use the host directly under OS permissions. In safe mode, each tool command self-reexecs through an embedded rootless Linux sandbox: Landlock when fully available, otherwise a rootless user/mount namespace allowlist, plus no-new-privileges and a seccomp denylist. Only the workspace, pc temp/home, required runtime paths, and optional explicit credential paths are visible. In readonly mode, write/edit/bash are disabled. bash never spends more than 10 seconds synchronously waiting for a command; when status=running, continue useful independent work and attach the returned pid later. Pipes/redirection are supported; curses/TTY programs are not. Every bash invocation writes combined stdout/stderr to a readable temp log.", self.state.security.mode),
-        )
+        .with_instructions(format!(
+            "Four tools: read/write/edit/bash. Security={:?}. Long bash commands detach after 2s; attach by pid.",
+            self.state.security.mode
+        ))
     }
 
     fn discover(
@@ -686,7 +686,6 @@ async fn finish_entry(entry: &Arc<ProcessEntry>, exit_code: Option<i32>) {
     state.finished = true;
     state.exit_code = exit_code;
     drop(state);
-    entry.notify.notify_waiters();
 }
 
 #[cfg(windows)]
@@ -747,38 +746,160 @@ fn resolve_path(workspace: &Path, raw: &str) -> PathBuf {
     }
 }
 
+async fn cleanup_task_logs(log_dir: &Path, processes: &ProcessRegistry) -> Result<(), McpError> {
+    cleanup_task_logs_with_limits(log_dir, processes, LOG_RETENTION, MAX_LOG_DIR_BYTES).await
+}
+
+async fn cleanup_task_logs_with_limits(
+    log_dir: &Path,
+    processes: &ProcessRegistry,
+    retention: Duration,
+    max_bytes: u64,
+) -> Result<(), McpError> {
+    let entries = {
+        let registry = processes.inner.read().await;
+        registry.values().cloned().collect::<Vec<_>>()
+    };
+
+    let mut active = HashSet::new();
+    let mut finished_by_path = HashMap::new();
+    for entry in entries {
+        if entry.state.read().await.finished {
+            finished_by_path.insert(entry.log_path.clone(), entry.pid);
+        } else {
+            active.insert(entry.log_path.clone());
+        }
+    }
+
+    let mut dir = tokio::fs::read_dir(log_dir)
+        .await
+        .map_err(|e| tool_error(format!("read command log directory: {e}")))?;
+    let mut files = Vec::new();
+    let mut total_bytes = 0u64;
+    while let Some(item) = dir
+        .next_entry()
+        .await
+        .map_err(|e| tool_error(format!("scan command log directory: {e}")))?
+    {
+        let path = item.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("log") {
+            continue;
+        }
+        let metadata = item
+            .metadata()
+            .await
+            .map_err(|e| tool_error(format!("stat command log {}: {e}", path.display())))?;
+        let modified = metadata.modified().unwrap_or(std::time::UNIX_EPOCH);
+        total_bytes = total_bytes.saturating_add(metadata.len());
+        files.push((path, metadata.len(), modified));
+    }
+
+    let now = std::time::SystemTime::now();
+    let mut deleted = HashSet::new();
+    let mut deleted_pids = Vec::new();
+
+    for (path, bytes, modified) in &files {
+        if active.contains(path) {
+            continue;
+        }
+        let age = now.duration_since(*modified).unwrap_or_default();
+        if age < retention {
+            continue;
+        }
+        if tokio::fs::remove_file(path).await.is_ok() {
+            deleted.insert(path.clone());
+            total_bytes = total_bytes.saturating_sub(*bytes);
+            if let Some(pid) = finished_by_path.get(path) {
+                deleted_pids.push(*pid);
+            }
+        }
+    }
+
+    if total_bytes > max_bytes {
+        files.sort_by_key(|(_, _, modified)| *modified);
+        for (path, bytes, _) in &files {
+            if total_bytes <= max_bytes {
+                break;
+            }
+            if active.contains(path) || deleted.contains(path) {
+                continue;
+            }
+            if tokio::fs::remove_file(path).await.is_ok() {
+                deleted.insert(path.clone());
+                total_bytes = total_bytes.saturating_sub(*bytes);
+                if let Some(pid) = finished_by_path.get(path) {
+                    deleted_pids.push(*pid);
+                }
+            }
+        }
+    }
+
+    if !deleted_pids.is_empty() {
+        let mut registry = processes.inner.write().await;
+        for pid in deleted_pids {
+            registry.remove(&pid);
+        }
+    }
+
+    Ok(())
+}
+
 async fn bounded_tail(path: &Path) -> Result<(String, bool), McpError> {
-    let bytes = tokio::fs::read(path)
+    let mut file = tokio::fs::File::open(path)
         .await
         .map_err(|e| tool_error(format!("read command log: {e}")))?;
-    let text = String::from_utf8_lossy(&bytes);
-    let total_lines = text.lines().count();
-
-    if bytes.len() <= MAX_OUTPUT_BYTES && total_lines <= MAX_OUTPUT_LINES {
-        return Ok((text.into_owned(), false));
+    let len = file
+        .metadata()
+        .await
+        .map_err(|e| tool_error(format!("stat command log: {e}")))?
+        .len();
+    let start = len.saturating_sub(MAX_TAIL_READ_BYTES);
+    if start > 0 {
+        file.seek(SeekFrom::Start(start))
+            .await
+            .map_err(|e| tool_error(format!("seek command log: {e}")))?;
     }
 
-    let mut lines: Vec<&str> = text.lines().rev().take(MAX_OUTPUT_LINES).collect();
-    lines.reverse();
-    let mut output = lines.join("\n");
+    let mut bytes = Vec::with_capacity((len - start) as usize);
+    file.read_to_end(&mut bytes)
+        .await
+        .map_err(|e| tool_error(format!("read command log tail: {e}")))?;
 
-    if output.len() > MAX_OUTPUT_BYTES {
-        let start = output.len() - MAX_OUTPUT_BYTES;
-        let mut boundary = start;
-        while !output.is_char_boundary(boundary) {
+    let mut text = String::from_utf8_lossy(&bytes).into_owned();
+    let mut truncated = start > 0;
+    if start > 0
+        && let Some(newline) = text.find('\n')
+    {
+        text.drain(..=newline);
+    }
+
+    let total_lines = text.lines().count();
+    if total_lines > MAX_OUTPUT_LINES {
+        let mut lines: Vec<&str> = text.lines().rev().take(MAX_OUTPUT_LINES).collect();
+        lines.reverse();
+        text = lines.join("\n");
+        truncated = true;
+    }
+
+    if text.len() > MAX_OUTPUT_BYTES {
+        let mut boundary = text.len() - MAX_OUTPUT_BYTES;
+        while !text.is_char_boundary(boundary) {
             boundary += 1;
         }
-        output = output[boundary..].to_string();
-        if let Some(newline) = output.find('\n') {
-            output = output[newline + 1..].to_string();
+        text = text[boundary..].to_string();
+        if let Some(newline) = text.find('\n') {
+            text = text[newline + 1..].to_string();
         }
+        truncated = true;
     }
 
-    output.push_str(&format!(
-        "\n\n[Output truncated. Showing the last bounded portion. Full output: {}]",
-        path.display()
-    ));
-    Ok((output, true))
+    if truncated {
+        text.push_str(&format!(
+            "\n\n[Output truncated. Full output: {}]",
+            path.display()
+        ));
+    }
+    Ok((text, truncated))
 }
 
 fn prepare_image_preview(bytes: &[u8], mime_type: &str) -> Result<ImagePreview, McpError> {
@@ -871,9 +992,23 @@ fn structured_text_result(
     Ok(result)
 }
 
-fn json_result(value: &impl Serialize) -> Result<CallToolResult, McpError> {
-    let text = serde_json::to_string_pretty(value).map_err(|e| tool_error(e.to_string()))?;
-    structured_text_result(text, value)
+fn bash_result(value: BashResult) -> Result<CallToolResult, McpError> {
+    let summary = match value.exit_code {
+        Some(code) => format!(
+            "{} pid={} exit_code={} log={}",
+            value.status,
+            value.pid,
+            code,
+            value.full_output_path.as_deref().unwrap_or("-")
+        ),
+        None => format!(
+            "{} pid={} log={}",
+            value.status,
+            value.pid,
+            value.full_output_path.as_deref().unwrap_or("-")
+        ),
+    };
+    structured_text_result(summary, &value)
 }
 
 fn tool_error(message: impl Into<String>) -> McpError {
@@ -1148,6 +1283,119 @@ mod tests {
         let _ = tokio::fs::remove_dir_all(workspace).await;
     }
 
+    #[test]
+    fn bash_result_does_not_duplicate_full_output_in_text_content() {
+        let result = bash_result(BashResult {
+            status: "exited",
+            pid: 7,
+            exit_code: Some(0),
+            output: "very large output body".to_string(),
+            full_output_path: Some("/tmp/task.log".to_string()),
+            truncated: false,
+            instruction: None,
+        })
+        .expect("build bash result");
+
+        let text = result.content[0]
+            .as_text()
+            .expect("bash summary must be text")
+            .text
+            .clone();
+        assert!(!text.contains("very large output body"));
+        assert_eq!(
+            result.structured_content.as_ref().unwrap()["output"],
+            "very large output body"
+        );
+    }
+
+    #[tokio::test]
+    async fn bounded_tail_reads_only_a_bounded_suffix() {
+        let workspace = std::env::temp_dir().join(format!("pc-tail-test-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .expect("create tail test workspace");
+        let path = workspace.join("large.log");
+
+        let mut content = String::new();
+        for index in 0..20_000 {
+            content.push_str(&format!("line-{index:05} payload payload payload\n"));
+        }
+        tokio::fs::write(&path, content)
+            .await
+            .expect("write large log");
+
+        let (tail, truncated) = bounded_tail(&path).await.expect("read bounded tail");
+        assert!(truncated);
+        assert!(tail.len() <= MAX_OUTPUT_BYTES + 256);
+        assert!(tail.contains("line-19999"));
+
+        let _ = tokio::fs::remove_dir_all(workspace).await;
+    }
+
+    #[tokio::test]
+    async fn log_cleanup_preserves_active_logs_and_enforces_quota() {
+        let workspace = std::env::temp_dir().join(format!("pc-log-cleanup-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .expect("create cleanup workspace");
+
+        let stale = workspace.join("stale.log");
+        let active_path = workspace.join("active.log");
+        tokio::fs::write(&stale, b"stale")
+            .await
+            .expect("write stale log");
+        tokio::fs::write(&active_path, b"active")
+            .await
+            .expect("write active log");
+
+        let registry = ProcessRegistry::default();
+        registry.inner.write().await.insert(
+            42,
+            Arc::new(ProcessEntry {
+                pid: 42,
+                log_path: active_path.clone(),
+                visible_log_path: active_path.to_string_lossy().into_owned(),
+                state: RwLock::new(ProcessState {
+                    finished: false,
+                    exit_code: None,
+                }),
+            }),
+        );
+
+        cleanup_task_logs_with_limits(&workspace, &registry, Duration::ZERO, u64::MAX)
+            .await
+            .expect("remove stale logs");
+        assert!(!stale.exists());
+        assert!(active_path.exists());
+
+        let q1 = workspace.join("q1.log");
+        let q2 = workspace.join("q2.log");
+        tokio::fs::write(&q1, vec![b'a'; 10])
+            .await
+            .expect("write q1");
+        tokio::fs::write(&q2, vec![b'b'; 10])
+            .await
+            .expect("write q2");
+        cleanup_task_logs_with_limits(&workspace, &registry, Duration::from_secs(3600), 16)
+            .await
+            .expect("enforce log quota");
+
+        let mut dir = tokio::fs::read_dir(&workspace)
+            .await
+            .expect("scan cleanup workspace");
+        let mut total = 0u64;
+        while let Some(entry) = dir.next_entry().await.expect("read cleanup entry") {
+            total += entry.metadata().await.expect("stat cleanup entry").len();
+        }
+        assert!(
+            total <= 16,
+            "active log is protected; non-active logs must be pruned"
+        );
+        assert!(active_path.exists());
+
+        let _ = tokio::fs::remove_dir_all(workspace).await;
+    }
+
     #[tokio::test]
     async fn long_bash_detaches_then_attaches_same_pid() {
         let workspace = std::env::temp_dir().join(format!("pc-bash-test-{}", Uuid::new_v4()));
@@ -1168,13 +1416,18 @@ mod tests {
         let mcp = PcMcp::new(state.clone());
 
         let started = Instant::now();
-        mcp.start_command(long_test_command().into())
+        let first = mcp
+            .start_command(long_test_command().into())
             .await
             .expect("long command should detach cleanly");
 
         assert!(
-            started.elapsed() < Duration::from_millis(11_500),
-            "bash call waited for the command instead of detaching"
+            started.elapsed() < Duration::from_millis(3_500),
+            "bash call waited too long before detaching"
+        );
+        assert_eq!(
+            first.structured_content.as_ref().unwrap()["status"],
+            "running"
         );
 
         let entry = {
@@ -1185,9 +1438,29 @@ mod tests {
         let pid = entry.pid;
         assert!(!entry.state.read().await.finished);
 
-        mcp.attach_process(pid)
+        let attach_started = Instant::now();
+        let attached = mcp
+            .attach_process(pid)
             .await
-            .expect("attach should observe the original process finishing");
+            .expect("attach should return an immediate snapshot");
+        assert!(
+            attach_started.elapsed() < Duration::from_millis(750),
+            "attach waited instead of returning immediately"
+        );
+        assert_eq!(
+            attached.structured_content.as_ref().unwrap()["status"],
+            "running"
+        );
+
+        tokio::time::sleep(Duration::from_millis(2_500)).await;
+        let finished = mcp
+            .attach_process(pid)
+            .await
+            .expect("finished process should remain attachable");
+        assert_eq!(
+            finished.structured_content.as_ref().unwrap()["status"],
+            "exited"
+        );
 
         let final_state = *entry.state.read().await;
         assert!(final_state.finished);
@@ -1203,11 +1476,11 @@ mod tests {
 
     #[cfg(windows)]
     fn long_test_command() -> &'static str {
-        "ping -n 13 127.0.0.1 >NUL & echo done"
+        "ping -n 5 127.0.0.1 >NUL & echo done"
     }
 
     #[cfg(not(windows))]
     fn long_test_command() -> &'static str {
-        "sleep 12; printf done"
+        "sleep 4; printf done"
     }
 }
