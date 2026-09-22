@@ -2,6 +2,7 @@ use std::{
     borrow::Cow,
     collections::HashMap,
     fs::OpenOptions,
+    io::Cursor,
     path::{Path, PathBuf},
     process::Stdio,
     sync::Arc,
@@ -9,6 +10,9 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use image::{
+    DynamicImage, GenericImageView, ImageFormat, codecs::jpeg::JpegEncoder, imageops::FilterType,
+};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -29,6 +33,8 @@ use crate::{AppState, config::SecurityMode};
 
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
 const MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024;
+const MAX_IMAGE_PREVIEW_EDGE: u32 = 2048;
+const IMAGE_PREVIEW_JPEG_QUALITY: u8 = 85;
 const MAX_OUTPUT_LINES: usize = 2000;
 const SYNC_WAIT: Duration = Duration::from_secs(10);
 const PC_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
@@ -82,6 +88,31 @@ struct ReadOutput {
     mime_type: String,
     bytes: usize,
     path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImageReadMetadata {
+    path: String,
+    original_mime_type: String,
+    original_bytes: usize,
+    original_width: u32,
+    original_height: u32,
+    preview_mime_type: String,
+    preview_bytes: usize,
+    preview_width: u32,
+    preview_height: u32,
+    resized: bool,
+}
+
+struct ImagePreview {
+    bytes: Vec<u8>,
+    mime_type: String,
+    original_width: u32,
+    original_height: u32,
+    width: u32,
+    height: u32,
+    resized: bool,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -164,7 +195,7 @@ impl PcMcp {
     #[tool(
         name = "read",
         title = "Read file",
-        description = "Read a file. PNG, JPEG, WebP, and GIF files are returned as native MCP image content so vision-capable clients can inspect them directly. Other files are read as UTF-8 text. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Text output is truncated to 2000 lines or 50KB (whichever is hit first); use offset/limit to continue large text files. offset/limit are ignored for recognized images.",
+        description = "Read a file. PNG, JPEG, WebP, and GIF files are returned as embedded MCP resources for vision-capable clients. Images larger than 2048 px on either edge are downscaled in memory for the preview without modifying the original file. Other files are read as UTF-8 text. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Text output is truncated to 2000 lines or 50KB (whichever is hit first); use offset/limit to continue large text files. offset/limit are ignored for recognized images.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<ReadOutput>(),
         annotations(
             title = "Read file",
@@ -208,20 +239,33 @@ impl PcMcp {
                 )));
             }
 
-            let structured = ReadOutput {
-                mime_type: mime_type.to_string(),
-                bytes: total_bytes,
+            let preview = prepare_image_preview(&bytes, mime_type)?;
+            let metadata = serde_json::to_string(&ImageReadMetadata {
                 path: input.path,
+                original_mime_type: mime_type.to_string(),
+                original_bytes: total_bytes,
+                original_width: preview.original_width,
+                original_height: preview.original_height,
+                preview_mime_type: preview.mime_type.clone(),
+                preview_bytes: preview.bytes.len(),
+                preview_width: preview.width,
+                preview_height: preview.height,
+                resized: preview.resized,
+            })
+            .map_err(|e| tool_error(format!("serialize read result: {e}")))?;
+            let extension = match preview.mime_type.as_str() {
+                "image/jpeg" => "jpg",
+                "image/png" => "png",
+                "image/webp" => "webp",
+                "image/gif" => "gif",
+                _ => "bin",
             };
-            let metadata = serde_json::to_string(&structured)
-                .map_err(|e| tool_error(format!("serialize read result: {e}")))?;
-            let encoded = STANDARD.encode(&bytes);
             let resource = EmbeddedResource::new(
                 ResourceContents::blob(
-                    encoded.clone(),
-                    format!("pc://read-image/{}", Uuid::new_v4()),
+                    STANDARD.encode(&preview.bytes),
+                    format!("pc://read-image/{}/preview.{extension}", Uuid::new_v4()),
                 )
-                .with_mime_type(mime_type),
+                .with_mime_type(preview.mime_type),
             )
             .with_annotations(
                 Annotations::default()
@@ -230,7 +274,6 @@ impl PcMcp {
             );
             return Ok(CallToolResult::success(vec![
                 ContentBlock::text(metadata),
-                ContentBlock::image(encoded.clone(), mime_type),
                 ContentBlock::Resource(resource),
             ]));
         }
@@ -763,6 +806,68 @@ async fn bounded_tail(path: &Path) -> Result<(String, bool), McpError> {
     Ok((output, true))
 }
 
+fn prepare_image_preview(bytes: &[u8], mime_type: &str) -> Result<ImagePreview, McpError> {
+    let format = match mime_type {
+        "image/png" => ImageFormat::Png,
+        "image/jpeg" => ImageFormat::Jpeg,
+        "image/webp" => ImageFormat::WebP,
+        "image/gif" => ImageFormat::Gif,
+        _ => {
+            return Err(tool_error(format!(
+                "unsupported image MIME type: {mime_type}"
+            )));
+        }
+    };
+
+    let image = image::load_from_memory_with_format(bytes, format)
+        .map_err(|e| tool_error(format!("decode {mime_type} image: {e}")))?;
+    let (original_width, original_height) = image.dimensions();
+
+    if original_width <= MAX_IMAGE_PREVIEW_EDGE && original_height <= MAX_IMAGE_PREVIEW_EDGE {
+        return Ok(ImagePreview {
+            bytes: bytes.to_vec(),
+            mime_type: mime_type.to_string(),
+            original_width,
+            original_height,
+            width: original_width,
+            height: original_height,
+            resized: false,
+        });
+    }
+
+    let resized = image.resize(
+        MAX_IMAGE_PREVIEW_EDGE,
+        MAX_IMAGE_PREVIEW_EDGE,
+        FilterType::Triangle,
+    );
+    let (width, height) = resized.dimensions();
+
+    let (preview_bytes, preview_mime_type) = if resized.color().has_alpha() {
+        let mut cursor = Cursor::new(Vec::new());
+        resized
+            .write_to(&mut cursor, ImageFormat::Png)
+            .map_err(|e| tool_error(format!("encode PNG image preview: {e}")))?;
+        (cursor.into_inner(), "image/png")
+    } else {
+        let rgb = resized.to_rgb8();
+        let mut encoded = Vec::new();
+        JpegEncoder::new_with_quality(&mut encoded, IMAGE_PREVIEW_JPEG_QUALITY)
+            .encode(rgb.as_raw(), width, height, image::ExtendedColorType::Rgb8)
+            .map_err(|e| tool_error(format!("encode JPEG image preview: {e}")))?;
+        (encoded, "image/jpeg")
+    };
+
+    Ok(ImagePreview {
+        bytes: preview_bytes,
+        mime_type: preview_mime_type.to_string(),
+        original_width,
+        original_height,
+        width,
+        height,
+        resized: true,
+    })
+}
+
 fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         Some("image/png")
@@ -889,28 +994,41 @@ mod tests {
         assert_eq!(image_mime_type(b"plain text"), None);
     }
 
-    #[tokio::test]
-    async fn read_returns_native_mcp_image_content() {
-        let workspace = std::env::temp_dir().join(format!("pc-image-test-{}", Uuid::new_v4()));
-        tokio::fs::create_dir_all(&workspace)
-            .await
-            .expect("create test workspace");
-        let image_bytes = b"\x89PNG\r\n\x1a\npc-test-image";
-        tokio::fs::write(workspace.join("test.png"), image_bytes)
-            .await
-            .expect("write test image");
+    fn encode_test_png(width: u32, height: u32) -> Vec<u8> {
+        let image = DynamicImage::new_rgb8(width, height);
+        let mut cursor = Cursor::new(Vec::new());
+        image
+            .write_to(&mut cursor, ImageFormat::Png)
+            .expect("encode test PNG");
+        cursor.into_inner()
+    }
 
-        let state = Arc::new(AppState {
+    fn image_test_state(workspace: &Path) -> Arc<AppState> {
+        Arc::new(AppState {
             public_url: None,
             oauth_password: None,
-            workspace: workspace.clone(),
+            workspace: workspace.to_path_buf(),
             security: crate::config::SecurityConfig::default(),
             sandbox: None,
             allowed_redirect_hosts: Vec::new(),
             production: false,
             processes: ProcessRegistry::default(),
-        });
-        let mcp = PcMcp::new(state);
+        })
+    }
+
+    #[tokio::test]
+    async fn read_small_image_returns_original_as_embedded_resource_only() {
+        let workspace = std::env::temp_dir().join(format!("pc-image-test-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .expect("create test workspace");
+        let image_bytes = encode_test_png(640, 320);
+        let image_path = workspace.join("test.png");
+        tokio::fs::write(&image_path, &image_bytes)
+            .await
+            .expect("write test image");
+
+        let mcp = PcMcp::new(image_test_state(&workspace));
         let result = mcp
             .read(Parameters(ReadParams {
                 path: "test.png".into(),
@@ -920,20 +1038,26 @@ mod tests {
             .await
             .expect("read image");
 
-        assert_eq!(result.content.len(), 3);
-        assert!(
-            result.content[0]
+        assert_eq!(result.content.len(), 2);
+        assert!(result.content.iter().all(|item| item.as_image().is_none()));
+
+        let metadata: serde_json::Value = serde_json::from_str(
+            &result.content[0]
                 .as_text()
-                .is_some_and(|text| text.text.contains("image/png"))
-        );
-        let image = result.content[1]
-            .as_image()
-            .expect("second content block must be an image");
-        assert_eq!(image.mime_type, "image/png");
-        assert_eq!(image.data, STANDARD.encode(image_bytes));
-        let resource = result.content[2]
+                .expect("first content block must be metadata text")
+                .text,
+        )
+        .expect("parse image metadata");
+        assert_eq!(metadata["originalWidth"], 640);
+        assert_eq!(metadata["originalHeight"], 320);
+        assert_eq!(metadata["previewWidth"], 640);
+        assert_eq!(metadata["previewHeight"], 320);
+        assert_eq!(metadata["previewMimeType"], "image/png");
+        assert_eq!(metadata["resized"], false);
+
+        let resource = result.content[1]
             .as_resource()
-            .expect("third content block must be an embedded resource");
+            .expect("second content block must be an embedded resource");
         match &resource.resource {
             ResourceContents::BlobResourceContents {
                 uri,
@@ -942,21 +1066,88 @@ mod tests {
                 ..
             } => {
                 assert!(uri.starts_with("pc://read-image/"));
+                assert!(uri.ends_with("/preview.png"));
                 assert_eq!(mime_type.as_deref(), Some("image/png"));
-                assert_eq!(blob, &STANDARD.encode(image_bytes));
+                assert_eq!(
+                    STANDARD.decode(blob).expect("decode embedded blob"),
+                    image_bytes
+                );
             }
             _ => panic!("embedded resource must contain a blob"),
         }
-        let annotations = resource
-            .annotations
-            .as_ref()
-            .expect("embedded resource must carry annotations");
-        assert_eq!(annotations.priority, Some(1.0));
-        assert_eq!(
-            annotations.audience,
-            Some(vec![Role::Assistant, Role::User])
-        );
         assert_eq!(result.structured_content, None);
+        assert_eq!(
+            tokio::fs::read(&image_path).await.expect("reread original"),
+            image_bytes
+        );
+
+        let _ = tokio::fs::remove_dir_all(workspace).await;
+    }
+
+    #[tokio::test]
+    async fn read_large_image_downscales_preview_without_modifying_original() {
+        let workspace = std::env::temp_dir().join(format!("pc-image-test-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .expect("create test workspace");
+        let image_bytes = encode_test_png(4096, 1024);
+        let image_path = workspace.join("large.png");
+        tokio::fs::write(&image_path, &image_bytes)
+            .await
+            .expect("write test image");
+
+        let mcp = PcMcp::new(image_test_state(&workspace));
+        let result = mcp
+            .read(Parameters(ReadParams {
+                path: "large.png".into(),
+                offset: None,
+                limit: None,
+            }))
+            .await
+            .expect("read large image");
+
+        assert_eq!(result.content.len(), 2);
+        assert!(result.content.iter().all(|item| item.as_image().is_none()));
+
+        let metadata: serde_json::Value = serde_json::from_str(
+            &result.content[0]
+                .as_text()
+                .expect("first content block must be metadata text")
+                .text,
+        )
+        .expect("parse image metadata");
+        assert_eq!(metadata["originalWidth"], 4096);
+        assert_eq!(metadata["originalHeight"], 1024);
+        assert_eq!(metadata["previewWidth"], 2048);
+        assert_eq!(metadata["previewHeight"], 512);
+        assert_eq!(metadata["previewMimeType"], "image/jpeg");
+        assert_eq!(metadata["resized"], true);
+
+        let resource = result.content[1]
+            .as_resource()
+            .expect("second content block must be an embedded resource");
+        match &resource.resource {
+            ResourceContents::BlobResourceContents {
+                uri,
+                mime_type,
+                blob,
+                ..
+            } => {
+                assert!(uri.ends_with("/preview.jpg"));
+                assert_eq!(mime_type.as_deref(), Some("image/jpeg"));
+                let preview_bytes = STANDARD.decode(blob).expect("decode embedded preview");
+                let preview =
+                    image::load_from_memory_with_format(&preview_bytes, ImageFormat::Jpeg)
+                        .expect("decode preview JPEG");
+                assert_eq!(preview.dimensions(), (2048, 512));
+            }
+            _ => panic!("embedded resource must contain a blob"),
+        }
+        assert_eq!(result.structured_content, None);
+        assert_eq!(
+            tokio::fs::read(&image_path).await.expect("reread original"),
+            image_bytes
+        );
 
         let _ = tokio::fs::remove_dir_all(workspace).await;
     }
