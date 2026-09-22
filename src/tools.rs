@@ -12,8 +12,9 @@ use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
     model::{
-        CacheScope, CallToolResult, ContentBlock, DiscoverResult, Implementation, ProtocolVersion,
-        ServerCapabilities, ServerConfig, SubscriptionFilter,
+        CacheScope, CallToolResult, ContentBlock, DiscoverResult, Implementation, ListToolsResult,
+        PaginatedRequestParams, ProtocolVersion, ServerCapabilities, ServerConfig,
+        SubscriptionFilter,
     },
     schemars,
     service::{RequestContext, SubscriptionContext},
@@ -534,6 +535,29 @@ impl ServerHandler for PcMcp {
         // this response to decide whether to perform the automatic action scan.
         .with_cache_scope(CacheScope::Public);
         std::future::ready(Ok(result))
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        context: RequestContext<rmcp::RoleServer>,
+    ) -> Result<ListToolsResult, McpError> {
+        let modern = context
+            .protocol_version()
+            .is_some_and(|version| version >= ProtocolVersion::V_2026_07_28);
+        let mut result = ListToolsResult::with_all_items(self.tool_router.list_all());
+
+        if modern {
+            result.ttl_ms = Some(0);
+            result.cache_scope = Some(CacheScope::Public);
+            result.meta.get_or_insert_default().insert(
+                "io.modelcontextprotocol/serverInfo".to_string(),
+                serde_json::to_value(self.get_info().server_info)
+                    .expect("server implementation serialization cannot fail"),
+            );
+        }
+
+        Ok(result)
     }
 
     fn accepted_subscription_filter(

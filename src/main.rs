@@ -465,7 +465,14 @@ mod tests {
             LocalSessionManager::default().into(),
             mcp_http_config(None).expect("MCP HTTP config"),
         );
+        let root_service_state = state.clone();
+        let root_service = StreamableHttpService::new(
+            move || Ok(PcMcp::new(root_service_state.clone())),
+            LocalSessionManager::default().into(),
+            mcp_http_config(None).expect("root MCP HTTP config"),
+        );
         let app = Router::new()
+            .route_service("/", root_service)
             .route_service("/mcp", service)
             .route_layer(middleware::from_fn(normalize_chatgpt_action_scan))
             .route_layer(middleware::from_fn(mcp_streamable_response_headers));
@@ -478,7 +485,7 @@ mod tests {
         });
 
         let discover = r#"{"jsonrpc":"2.0","id":"d1","method":"server/discover","params":{"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientInfo":{"name":"chatgpt-action-scan","version":"1"},"io.modelcontextprotocol/clientCapabilities":{}}}}"#;
-        let discover_response = raw_mcp_post(addr, "server/discover", discover).await;
+        let discover_response = raw_mcp_post(addr, "/mcp", "server/discover", discover).await;
         assert!(
             discover_response.starts_with("HTTP/1.1 200"),
             "discover failed: {discover_response}"
@@ -511,7 +518,7 @@ mod tests {
         // This intentionally has no per-request _meta. MCPX accepts this shape,
         // and ChatGPT's automatic action scan uses it immediately after discover.
         let list = r#"{"jsonrpc":"2.0","id":"d2","method":"tools/list","params":{}}"#;
-        let list_response = raw_mcp_post(addr, "tools/list", list).await;
+        let list_response = raw_mcp_post(addr, "/mcp", "tools/list", list).await;
         assert!(
             list_response.starts_with("HTTP/1.1 200"),
             "automatic tools/list failed: {list_response}"
@@ -528,17 +535,29 @@ mod tests {
                 "tools/list missing {tool}: {list_response}"
             );
         }
+        assert!(
+            list_response.contains(
+                r#""io.modelcontextprotocol/serverInfo":{"name":"pc","version":"0.1.0"}"#
+            ),
+            "tools/list must carry the same server identity metadata as server/discover: {list_response}"
+        );
+
+        let root_discover = raw_mcp_post(addr, "/", "server/discover", discover).await;
+        assert!(
+            root_discover.starts_with("HTTP/1.1 200"),
+            "root MCP compatibility alias must remain usable: {root_discover}"
+        );
 
         server.abort();
         let _ = tokio::fs::remove_dir_all(workspace).await;
     }
 
-    async fn raw_mcp_post(addr: SocketAddr, method: &str, body: &str) -> String {
+    async fn raw_mcp_post(addr: SocketAddr, path: &str, method: &str, body: &str) -> String {
         let mut stream = tokio::net::TcpStream::connect(addr)
             .await
             .expect("connect test server");
         let request = format!(
-            "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: {method}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
+            "POST {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nMCP-Protocol-Version: 2026-07-28\r\nMcp-Method: {method}\r\nConnection: close\r\nContent-Length: {}\r\n\r\n{}",
             body.len(),
             body
         );
