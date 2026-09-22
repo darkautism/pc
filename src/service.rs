@@ -64,7 +64,7 @@ impl ServiceSpec {
             .map(PathBuf::from)
             .unwrap_or(crate::config::default_home()?);
         let pc_home = absolute_path(raw_pc_home)?;
-        let environment = service_environment(&pc_home);
+        let environment = service_environment(&pc_home, &user_home);
 
         validate_line_value("pc executable", &binary.to_string_lossy())?;
         validate_line_value("PC_HOME", &pc_home.to_string_lossy())?;
@@ -91,11 +91,17 @@ fn absolute_path(path: PathBuf) -> anyhow::Result<PathBuf> {
     }
 }
 
-fn service_environment(pc_home: &Path) -> Vec<(String, String)> {
-    let mut environment = vec![(
-        "PC_HOME".to_string(),
-        pc_home.to_string_lossy().into_owned(),
-    )];
+fn service_environment(pc_home: &Path, user_home: &Path) -> Vec<(String, String)> {
+    let mut environment = vec![
+        (
+            "PC_HOME".to_string(),
+            pc_home.to_string_lossy().into_owned(),
+        ),
+        (
+            "HOME".to_string(),
+            user_home.to_string_lossy().into_owned(),
+        ),
+    ];
 
     let path = std::env::var("PATH").unwrap_or_else(|_| {
         if cfg!(target_os = "macos") {
@@ -419,6 +425,7 @@ mod tests {
                     "PC_HOME".to_string(),
                     "/Users/dev/.config/pc".to_string(),
                 ),
+                ("HOME".to_string(), "/Users/dev".to_string()),
                 (
                     "PATH".to_string(),
                     "/opt/homebrew/bin:/usr/bin:/bin".to_string(),
@@ -433,6 +440,7 @@ mod tests {
         assert!(unit.contains("ExecStart=\"/Users/dev/bin/pc\""));
         assert!(unit.contains("WorkingDirectory=\"/Users/dev\""));
         assert!(unit.contains("Environment=\"PC_HOME=/Users/dev/.config/pc\""));
+        assert!(unit.contains("Environment=\"HOME=/Users/dev\""));
         assert!(unit.contains("Restart=on-failure"));
         assert!(unit.contains("WantedBy=default.target"));
         assert!(!unit.contains("PC_OAUTH_PASSWORD"));
@@ -446,6 +454,7 @@ mod tests {
         assert!(plist.contains("<key>RunAtLoad</key>"));
         assert!(plist.contains("<key>SuccessfulExit</key>"));
         assert!(plist.contains("<key>PC_HOME</key>"));
+        assert!(plist.contains("<key>HOME</key>"));
         assert!(!plist.contains("PC_OAUTH_PASSWORD"));
     }
 
