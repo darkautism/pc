@@ -183,10 +183,16 @@ impl PcMcp {
             }
 
             let metadata = format!("{} — {mime_type}, {} bytes", input.path, bytes.len());
-            return Ok(CallToolResult::success(vec![
+            let mut result = CallToolResult::success(vec![
                 ContentBlock::text(metadata),
                 ContentBlock::image(STANDARD.encode(&bytes), mime_type),
-            ]));
+            ]);
+            result.structured_content = Some(serde_json::json!({
+                "path": input.path,
+                "mimeType": mime_type,
+                "bytes": bytes.len(),
+            }));
+            return Ok(result);
         }
 
         let text = String::from_utf8(bytes)
@@ -843,6 +849,14 @@ mod tests {
             .expect("second content block must be an image");
         assert_eq!(image.mime_type, "image/png");
         assert_eq!(image.data, STANDARD.encode(image_bytes));
+        assert_eq!(
+            result.structured_content,
+            Some(serde_json::json!({
+                "path": "test.png",
+                "mimeType": "image/png",
+                "bytes": image_bytes.len(),
+            }))
+        );
 
         let _ = tokio::fs::remove_dir_all(workspace).await;
     }
