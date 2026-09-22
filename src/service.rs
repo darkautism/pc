@@ -1,13 +1,20 @@
+use std::path::Path;
+
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
+use std::path::PathBuf;
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     fs,
-    path::{Path, PathBuf},
     process::{Command, Stdio},
 };
 
-use anyhow::{Context, bail, ensure};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use anyhow::{Context, ensure};
 use clap::Subcommand;
 
+#[cfg(target_os = "linux")]
 const SYSTEMD_UNIT: &str = "pc.service";
+#[cfg(any(target_os = "macos", test))]
 const LAUNCHD_LABEL: &str = "io.github.darkautism.pc";
 
 #[derive(Subcommand, Debug, Clone, Copy)]
@@ -26,6 +33,7 @@ pub enum ServiceAction {
     Uninstall,
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos", test))]
 #[derive(Debug)]
 struct ServiceSpec {
     binary: PathBuf,
@@ -34,25 +42,25 @@ struct ServiceSpec {
 }
 
 pub fn run(action: ServiceAction, explicit_home: Option<&Path>) -> anyhow::Result<()> {
-    let spec = ServiceSpec::resolve(explicit_home)?;
-
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
+        let spec = ServiceSpec::resolve(explicit_home)?;
+
+        #[cfg(target_os = "linux")]
         return linux::run(action, &spec);
-    }
 
-    #[cfg(target_os = "macos")]
-    {
+        #[cfg(target_os = "macos")]
         return macos::run(action, &spec);
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
-        let _ = (action, spec);
-        bail!("pc service management currently supports Linux systemd and macOS launchd")
+        let _ = (action, explicit_home);
+        anyhow::bail!("pc service management currently supports Linux systemd and macOS launchd")
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl ServiceSpec {
     fn resolve(explicit_home: Option<&Path>) -> anyhow::Result<Self> {
         let binary = std::env::current_exe().context("resolve current pc executable")?;
@@ -81,6 +89,7 @@ impl ServiceSpec {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn absolute_path(path: PathBuf) -> anyhow::Result<PathBuf> {
     if path.is_absolute() {
         Ok(path)
@@ -91,16 +100,14 @@ fn absolute_path(path: PathBuf) -> anyhow::Result<PathBuf> {
     }
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn service_environment(pc_home: &Path, user_home: &Path) -> Vec<(String, String)> {
     let mut environment = vec![
         (
             "PC_HOME".to_string(),
             pc_home.to_string_lossy().into_owned(),
         ),
-        (
-            "HOME".to_string(),
-            user_home.to_string_lossy().into_owned(),
-        ),
+        ("HOME".to_string(), user_home.to_string_lossy().into_owned()),
     ];
 
     let path = std::env::var("PATH").unwrap_or_else(|_| {
@@ -126,6 +133,7 @@ fn service_environment(pc_home: &Path, user_home: &Path) -> Vec<(String, String)
     environment
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn validate_line_value(name: &str, value: &str) -> anyhow::Result<()> {
     ensure!(
         !value.contains('\n') && !value.contains('\r') && !value.contains('\0'),
@@ -134,6 +142,7 @@ fn validate_line_value(name: &str, value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn atomic_write(path: &Path, content: &str) -> anyhow::Result<()> {
     let parent = path
         .parent()
@@ -149,11 +158,11 @@ fn atomic_write(path: &Path, content: &str) -> anyhow::Result<()> {
     ));
     fs::write(&temp, content)
         .with_context(|| format!("write temporary service file {}", temp.display()))?;
-    fs::rename(&temp, path)
-        .with_context(|| format!("install service file {}", path.display()))?;
+    fs::rename(&temp, path).with_context(|| format!("install service file {}", path.display()))?;
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_checked(command: &mut Command, description: &str) -> anyhow::Result<()> {
     let status = command
         .status()
@@ -162,13 +171,12 @@ fn run_checked(command: &mut Command, description: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn run_ignoring_status(command: &mut Command) {
-    let _ = command
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status();
+    let _ = command.stdout(Stdio::null()).stderr(Stdio::null()).status();
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn systemd_escape(value: &str) -> String {
     value
         .replace('\\', r#"\\"#)
@@ -176,6 +184,7 @@ fn systemd_escape(value: &str) -> String {
         .replace('%', "%%")
 }
 
+#[cfg(any(target_os = "linux", test))]
 fn render_systemd_unit(spec: &ServiceSpec) -> String {
     let mut unit = format!(
         "[Unit]\nDescription=pc MCP server\nAfter=network-online.target\nWants=network-online.target\n\n[Service]\nType=simple\nExecStart=\"{}\"\nWorkingDirectory=\"{}\"\nRestart=on-failure\nRestartSec=3\n",
@@ -193,6 +202,7 @@ fn render_systemd_unit(spec: &ServiceSpec) -> String {
     unit
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn xml_escape(value: &str) -> String {
     value
         .replace('&', "&amp;")
@@ -202,6 +212,7 @@ fn xml_escape(value: &str) -> String {
         .replace('\'', "&apos;")
 }
 
+#[cfg(any(target_os = "macos", test))]
 fn render_launchd_plist(spec: &ServiceSpec) -> String {
     let mut environment = String::new();
     for (key, value) in &spec.environment {
@@ -262,9 +273,7 @@ mod linux {
             ServiceAction::Start => systemctl(&["start", SYSTEMD_UNIT])?,
             ServiceAction::Stop => systemctl(&["stop", SYSTEMD_UNIT])?,
             ServiceAction::Restart => systemctl(&["restart", SYSTEMD_UNIT])?,
-            ServiceAction::Status => {
-                systemctl(&["status", "--no-pager", "--full", SYSTEMD_UNIT])?
-            }
+            ServiceAction::Status => systemctl(&["status", "--no-pager", "--full", SYSTEMD_UNIT])?,
             ServiceAction::Uninstall => {
                 let mut disable = Command::new("systemctl");
                 disable.args(["--user", "disable", "--now", SYSTEMD_UNIT]);
@@ -295,7 +304,10 @@ mod linux {
     fn systemctl(args: &[&str]) -> anyhow::Result<()> {
         let mut command = Command::new("systemctl");
         command.arg("--user").args(args);
-        run_checked(&mut command, &format!("systemctl --user {}", args.join(" ")))
+        run_checked(
+            &mut command,
+            &format!("systemctl --user {}", args.join(" ")),
+        )
     }
 }
 
@@ -334,10 +346,7 @@ mod macos {
                 launchctl(&["kickstart", "-k", &target], None)?;
             }
             ServiceAction::Stop => {
-                ensure!(
-                    is_loaded(&target),
-                    "pc service is not running or loaded"
-                );
+                ensure!(is_loaded(&target), "pc service is not running or loaded");
                 launchctl(&["bootout", &target], None)?;
             }
             ServiceAction::Restart => {
@@ -364,11 +373,12 @@ mod macos {
     }
 
     fn uid() -> anyhow::Result<String> {
-        let output = Command::new("id")
-            .arg("-u")
-            .output()
-            .context("run id -u")?;
-        ensure!(output.status.success(), "id -u failed with {}", output.status);
+        let output = Command::new("id").arg("-u").output().context("run id -u")?;
+        ensure!(
+            output.status.success(),
+            "id -u failed with {}",
+            output.status
+        );
         let uid = String::from_utf8(output.stdout).context("id -u returned non-UTF-8 output")?;
         let uid = uid.trim();
         ensure!(!uid.is_empty(), "id -u returned an empty uid");
@@ -421,10 +431,7 @@ mod tests {
             binary: PathBuf::from("/Users/dev/bin/pc"),
             user_home: PathBuf::from("/Users/dev"),
             environment: vec![
-                (
-                    "PC_HOME".to_string(),
-                    "/Users/dev/.config/pc".to_string(),
-                ),
+                ("PC_HOME".to_string(), "/Users/dev/.config/pc".to_string()),
                 ("HOME".to_string(), "/Users/dev".to_string()),
                 (
                     "PATH".to_string(),

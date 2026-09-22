@@ -71,11 +71,8 @@ pub struct PcMcp {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReadParams {
-    #[schemars(description = "Path to the file to read (relative or absolute)")]
     pub path: String,
-    #[schemars(description = "Line number to start reading from (1-indexed)")]
     pub offset: Option<usize>,
-    #[schemars(description = "Maximum number of lines to read")]
     pub limit: Option<usize>,
 }
 
@@ -115,9 +112,7 @@ struct ImagePreview {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WriteParams {
-    #[schemars(description = "Path to the file to write (relative or absolute)")]
     pub path: String,
-    #[schemars(description = "Content to write to the file")]
     pub content: String,
 }
 
@@ -131,22 +126,14 @@ struct WriteOutput {
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ReplaceEdit {
     #[serde(rename = "oldText")]
-    #[schemars(
-        description = "Exact text for one targeted replacement. It must be unique in the original file and must not overlap with any other edits[].oldText in the same call."
-    )]
     pub old_text: String,
     #[serde(rename = "newText")]
-    #[schemars(description = "Replacement text for this targeted edit.")]
     pub new_text: String,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EditParams {
-    #[schemars(description = "Path to the file to edit (relative or absolute)")]
     pub path: String,
-    #[schemars(
-        description = "One or more targeted replacements. Each edit is matched against the original file, not incrementally. Do not include overlapping or nested edits."
-    )]
     pub edits: Vec<ReplaceEdit>,
 }
 
@@ -160,13 +147,7 @@ struct EditOutput {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct BashParams {
-    #[schemars(
-        description = "Shell command to execute. Mutually exclusive with pid. Commands are never synchronously awaited for more than 10 seconds."
-    )]
     pub command: Option<String>,
-    #[schemars(
-        description = "PID returned by an earlier long-running bash call. Mutually exclusive with command. Attach waits at most 10 seconds."
-    )]
     pub pid: Option<u32>,
 }
 
@@ -193,10 +174,9 @@ impl PcMcp {
     #[tool(
         name = "read",
         title = "Read file",
-        description = "Read a file. PNG, JPEG, WebP, and GIF files are returned as embedded MCP resources for vision-capable clients. Images larger than 2048 px on either edge are downscaled in memory for the preview without modifying the original file. Other files are read as UTF-8 text. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Text output is truncated to 2000 lines or 50KB (whichever is hit first); use offset/limit to continue large text files. offset/limit are ignored for recognized images.",
+        description = "Read UTF-8 text or images. Text: 2000 lines/50KB max. Images: embedded preview, 2048px max edge; original unchanged.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<ReadOutput>(),
         annotations(
-            title = "Read file",
             read_only_hint = true,
             destructive_hint = false,
             idempotent_hint = true,
@@ -327,10 +307,9 @@ impl PcMcp {
     #[tool(
         name = "write",
         title = "Write file",
-        description = "Write content to a file. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Creates the file if it doesn't exist, overwrites if it does, and automatically creates parent directories.",
+        description = "Write/overwrite a file; creates parent directories.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<WriteOutput>(),
         annotations(
-            title = "Write file",
             read_only_hint = false,
             destructive_hint = true,
             idempotent_hint = true,
@@ -377,10 +356,9 @@ impl PcMcp {
     #[tool(
         name = "edit",
         title = "Edit file",
-        description = "Make precise file edits with exact text replacement, including multiple disjoint edits in one call. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Each edits[].oldText must match exactly once in the original file.",
+        description = "Exact replacements; each oldText must match once and edits may not overlap.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<EditOutput>(),
         annotations(
-            title = "Edit file",
             read_only_hint = false,
             destructive_hint = true,
             idempotent_hint = false,
@@ -481,10 +459,9 @@ impl PcMcp {
     #[tool(
         name = "bash",
         title = "Run shell command",
-        description = "Execute a non-interactive shell command in the configured workspace, or attach to a PID returned by a prior call. Unix uses bash; Windows uses cmd.exe. A command is synchronously awaited for at most 10 seconds. If still running, it is NOT killed: the tool returns its PID and asks you to do other independent work before attaching later. Attach also waits at most 10 seconds. stdout/stderr are combined; visible output is limited to the last 2000 lines or 50KB, with full output stored in the returned log path. Pipes and redirection are supported; interactive TTY/curses programs are not.",
+        description = "Run command or attach pid. Wait <=10s; long jobs continue. Output <=2000 lines/50KB; full log path returned.",
         output_schema = rmcp::handler::server::tool::schema_for_type::<BashResult>(),
         annotations(
-            title = "Run shell command",
             read_only_hint = false,
             destructive_hint = true,
             idempotent_hint = false,
@@ -914,6 +891,7 @@ mod tests {
         let read = PcMcp::read_tool_attr();
         assert_eq!(read.title.as_deref(), Some("Read file"));
         let read = read.annotations.expect("read annotations");
+        assert_eq!(read.title, None);
         assert_eq!(read.read_only_hint, Some(true));
         assert_eq!(read.destructive_hint, Some(false));
         assert_eq!(read.idempotent_hint, Some(true));
@@ -922,6 +900,7 @@ mod tests {
         let write = PcMcp::write_tool_attr();
         assert_eq!(write.title.as_deref(), Some("Write file"));
         let write = write.annotations.expect("write annotations");
+        assert_eq!(write.title, None);
         assert_eq!(write.read_only_hint, Some(false));
         assert_eq!(write.destructive_hint, Some(true));
         assert_eq!(write.idempotent_hint, Some(true));
@@ -930,6 +909,7 @@ mod tests {
         let edit = PcMcp::edit_tool_attr();
         assert_eq!(edit.title.as_deref(), Some("Edit file"));
         let edit = edit.annotations.expect("edit annotations");
+        assert_eq!(edit.title, None);
         assert_eq!(edit.read_only_hint, Some(false));
         assert_eq!(edit.destructive_hint, Some(true));
         assert_eq!(edit.idempotent_hint, Some(false));
@@ -938,6 +918,7 @@ mod tests {
         let bash = PcMcp::bash_tool_attr();
         assert_eq!(bash.title.as_deref(), Some("Run shell command"));
         let bash = bash.annotations.expect("bash annotations");
+        assert_eq!(bash.title, None);
         assert_eq!(bash.read_only_hint, Some(false));
         assert_eq!(bash.destructive_hint, Some(true));
         assert_eq!(bash.idempotent_hint, Some(false));
@@ -959,23 +940,40 @@ mod tests {
     }
 
     #[test]
-    fn publishes_compact_output_schemas_for_all_tools() {
+    fn publishes_compact_schemas_for_all_tools() {
         for tool in [
             PcMcp::read_tool_attr(),
             PcMcp::write_tool_attr(),
             PcMcp::edit_tool_attr(),
             PcMcp::bash_tool_attr(),
         ] {
-            let schema = tool
+            let input_json =
+                serde_json::to_string(&tool.input_schema).expect("serialize tool input schema");
+            assert!(
+                input_json.len() < 1536,
+                "{} inputSchema must remain compact; got {} bytes",
+                tool.name,
+                input_json.len()
+            );
+
+            let output = tool
                 .output_schema
                 .as_ref()
                 .unwrap_or_else(|| panic!("{} must expose outputSchema", tool.name));
-            let schema_json = serde_json::to_string(schema).expect("serialize tool output schema");
+            let output_json = serde_json::to_string(output).expect("serialize tool output schema");
             assert!(
-                schema_json.len() < 4096,
+                output_json.len() < 1024,
                 "{} outputSchema must remain compact; got {} bytes",
                 tool.name,
-                schema_json.len()
+                output_json.len()
+            );
+
+            let tool_json = serde_json::to_string(&tool).expect("serialize tool declaration");
+            assert!(
+                tool_json.len() < 2500,
+                "{} tool declaration must remain compact; got {} bytes",
+                tool.name,
+                tool_json.len()
             );
         }
     }
