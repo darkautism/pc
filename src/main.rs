@@ -9,7 +9,7 @@ use axum::{
     middleware::{self, Next},
     response::{IntoResponse, Response},
 };
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -19,6 +19,7 @@ use url::Url;
 
 mod config;
 mod sandbox;
+mod service;
 mod tools;
 
 use config::{ConfigOverrides, PcConfig, SecurityConfig, SecurityMode};
@@ -28,6 +29,9 @@ use tools::{PcMcp, ProcessRegistry};
 
 #[derive(Parser, Debug)]
 struct Args {
+    #[command(subcommand)]
+    command: Option<CliCommand>,
+
     #[arg(long, env = "PC_LISTEN", default_value = "0.0.0.0:8686")]
     listen: SocketAddr,
 
@@ -62,6 +66,15 @@ struct Args {
         default_missing_value = "true"
     )]
     production: Option<bool>,
+}
+
+#[derive(Subcommand, Debug)]
+enum CliCommand {
+    /// Manage pc as a native per-user background service.
+    Service {
+        #[command(subcommand)]
+        action: service::ServiceAction,
+    },
 }
 
 pub(crate) struct AppState {
@@ -99,6 +112,10 @@ async fn async_main() -> anyhow::Result<()> {
     );
 
     let args = Args::parse();
+    if let Some(CliCommand::Service { action }) = args.command.as_ref() {
+        return service::run(*action, args.home.as_deref());
+    }
+
     let home = args.home.clone().unwrap_or(config::default_home()?);
     let PcConfig {
         workspace,
