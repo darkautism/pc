@@ -213,16 +213,12 @@ impl PcMcp {
                 bytes: total_bytes,
                 path: input.path,
             };
-            let structured_value = serde_json::to_value(&structured)
-                .map_err(|e| tool_error(format!("serialize read result: {e}")))?;
             let metadata = serde_json::to_string(&structured)
                 .map_err(|e| tool_error(format!("serialize read result: {e}")))?;
-            let mut result = CallToolResult::success(vec![
+            return Ok(CallToolResult::success(vec![
                 ContentBlock::text(metadata),
                 ContentBlock::image(STANDARD.encode(&bytes), mime_type),
-            ]);
-            result.structured_content = Some(structured_value);
-            return Ok(result);
+            ]));
         }
 
         let text = String::from_utf8(bytes)
@@ -921,14 +917,7 @@ mod tests {
             .expect("second content block must be an image");
         assert_eq!(image.mime_type, "image/png");
         assert_eq!(image.data, STANDARD.encode(image_bytes));
-        assert_eq!(
-            result.structured_content,
-            Some(serde_json::json!({
-                "mimeType": "image/png",
-                "bytes": image_bytes.len(),
-                "path": "test.png",
-            }))
-        );
+        assert_eq!(result.structured_content, None);
 
         let _ = tokio::fs::remove_dir_all(workspace).await;
     }
