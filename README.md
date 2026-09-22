@@ -65,6 +65,32 @@ Environment variables can override the corresponding config values for that proc
 | `security.network` | `PC_SECURITY_NETWORK` |
 | `security.protect_secrets` | `PC_SECURITY_PROTECT_SECRETS` |
 
+## Native user service
+
+pc can install itself as a per-user background service. This does not require sudo and keeps credentials out of the generated service definition; the service persists only `PC_HOME`, `PATH`, and development-tool path selectors such as `RUSTUP_HOME`, `CARGO_HOME`, or `DEVELOPER_DIR`.
+
+Linux quick start:
+
+```bash
+cargo install --git https://github.com/darkautism/pc.git --locked
+pc service install
+pc service status
+```
+
+Linux uses `~/.config/systemd/user/pc.service` (or `$XDG_CONFIG_HOME/systemd/user/pc.service`) and `systemctl --user`. `install` is idempotent: it rewrites the unit, runs `daemon-reload`, then `enable --now`.
+
+macOS quick start:
+
+```bash
+cargo install --git https://github.com/darkautism/pc.git --locked
+pc service install
+pc service status
+```
+
+macOS uses `~/Library/LaunchAgents/io.github.darkautism.pc.plist` with modern `launchctl bootstrap/bootout/kickstart`. The current `safe` sandbox is Linux-only and fails closed on macOS; use `full` or `readonly` there.
+
+Available commands are `install`, `start`, `stop`, `restart`, `status`, and `uninstall`. To use a non-default config directory, pass `--home` before the subcommand, for example `pc --home /srv/pc service install`.
+
 ## Security modes
 
 `full` keeps Pi-like host access: relative paths start at `workspace`, absolute paths are allowed subject to OS permissions.
