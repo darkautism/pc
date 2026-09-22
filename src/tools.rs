@@ -75,17 +75,6 @@ pub struct ReadParams {
     pub limit: Option<usize>,
 }
 
-#[derive(Debug, Serialize, schemars::JsonSchema)]
-#[serde(rename_all = "camelCase")]
-struct ReadOutputMetadata {
-    kind: String,
-    path: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    mime_type: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    bytes: Option<usize>,
-}
-
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WriteParams {
     #[schemars(description = "Path to the file to write (relative or absolute)")]
@@ -152,7 +141,6 @@ impl PcMcp {
         name = "read",
         title = "Read file",
         description = "Read a file. PNG, JPEG, WebP, and GIF files are returned as native MCP image content so vision-capable clients can inspect them directly. Other files are read as UTF-8 text. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Text output is truncated to 2000 lines or 50KB (whichever is hit first); use offset/limit to continue large text files. offset/limit are ignored for recognized images.",
-        output_schema = rmcp::handler::server::tool::schema_for_type::<ReadOutputMetadata>(),
         annotations(
             title = "Read file",
             read_only_hint = true,
@@ -199,15 +187,11 @@ impl PcMcp {
                 ContentBlock::text(metadata),
                 ContentBlock::image(STANDARD.encode(&bytes), mime_type),
             ]);
-            result.structured_content = Some(
-                serde_json::to_value(ReadOutputMetadata {
-                    kind: "image".to_string(),
-                    path: input.path.clone(),
-                    mime_type: Some(mime_type.to_string()),
-                    bytes: Some(bytes.len()),
-                })
-                .expect("read output metadata serialization cannot fail"),
-            );
+            result.structured_content = Some(serde_json::json!({
+                "path": input.path,
+                "mimeType": mime_type,
+                "bytes": bytes.len(),
+            }));
             return Ok(result);
         }
 
@@ -247,17 +231,7 @@ impl PcMcp {
             ));
         }
 
-        let mut result = text_result(output);
-        result.structured_content = Some(
-            serde_json::to_value(ReadOutputMetadata {
-                kind: "text".to_string(),
-                path: input.path,
-                mime_type: None,
-                bytes: None,
-            })
-            .expect("read output metadata serialization cannot fail"),
-        );
-        Ok(result)
+        Ok(text_result(output))
     }
 
     #[tool(
@@ -807,23 +781,8 @@ mod tests {
 
     #[test]
     fn keeps_tools_list_lean_for_chatgpt_discovery() {
-        let read = PcMcp::read_tool_attr();
-        let schema = read
-            .output_schema
-            .as_ref()
-            .expect("read must expose compact outputSchema for ChatGPT media results");
-        let schema_json = serde_json::to_string(schema).expect("serialize read output schema");
-        assert!(schema_json.contains(r#""kind""#));
-        assert!(schema_json.contains(r#""path""#));
-        assert!(schema_json.contains(r#""mimeType""#));
-        assert!(schema_json.contains(r#""bytes""#));
-        assert!(
-            schema_json.len() < 2048,
-            "read outputSchema must remain compact; got {} bytes",
-            schema_json.len()
-        );
-
         for tool in [
+            PcMcp::read_tool_attr(),
             PcMcp::write_tool_attr(),
             PcMcp::edit_tool_attr(),
             PcMcp::bash_tool_attr(),
@@ -893,50 +852,9 @@ mod tests {
         assert_eq!(
             result.structured_content,
             Some(serde_json::json!({
-                "kind": "image",
                 "path": "test.png",
                 "mimeType": "image/png",
                 "bytes": image_bytes.len(),
-            }))
-        );
-
-        let _ = tokio::fs::remove_dir_all(workspace).await;
-    }
-
-    #[tokio::test]
-    async fn read_text_matches_declared_output_schema_shape() {
-        let workspace = std::env::temp_dir().join(format!("pc-text-test-{}", Uuid::new_v4()));
-        tokio::fs::create_dir_all(&workspace)
-            .await
-            .expect("create test workspace");
-        tokio::fs::write(workspace.join("test.txt"), b"hello")
-            .await
-            .expect("write test text");
-
-        let state = Arc::new(AppState {
-            public_url: None,
-            oauth_password: None,
-            workspace: workspace.clone(),
-            security: crate::config::SecurityConfig::default(),
-            sandbox: None,
-            allowed_redirect_hosts: Vec::new(),
-            production: false,
-            processes: ProcessRegistry::default(),
-        });
-        let result = PcMcp::new(state)
-            .read(Parameters(ReadParams {
-                path: "test.txt".into(),
-                offset: None,
-                limit: None,
-            }))
-            .await
-            .expect("read text");
-
-        assert_eq!(
-            result.structured_content,
-            Some(serde_json::json!({
-                "kind": "text",
-                "path": "test.txt",
             }))
         );
 
