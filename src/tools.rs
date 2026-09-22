@@ -8,6 +8,7 @@ use std::{
     time::Duration,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD};
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::{router::tool::ToolRouter, wrapper::Parameters},
@@ -27,6 +28,7 @@ use uuid::Uuid;
 use crate::{AppState, config::SecurityMode};
 
 const MAX_OUTPUT_BYTES: usize = 50 * 1024;
+const MAX_IMAGE_BYTES: usize = 25 * 1024 * 1024;
 const MAX_OUTPUT_LINES: usize = 2000;
 const SYNC_WAIT: Duration = Duration::from_secs(10);
 const PC_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
@@ -138,7 +140,7 @@ impl PcMcp {
     #[tool(
         name = "read",
         title = "Read file",
-        description = "Read the contents of a file. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. For text files, output is truncated to 2000 lines or 50KB (whichever is hit first). Use offset/limit for large files. When you need the full file, continue with offset until complete.",
+        description = "Read a file. PNG, JPEG, WebP, and GIF files are returned as native MCP image content so vision-capable clients can inspect them directly. Other files are read as UTF-8 text. Relative paths resolve from the configured working directory; absolute paths are allowed anywhere the server process can access. Text output is truncated to 2000 lines or 50KB (whichever is hit first); use offset/limit to continue large text files. offset/limit are ignored for recognized images.",
         annotations(
             title = "Read file",
             read_only_hint = true,
@@ -171,6 +173,22 @@ impl PcMcp {
                     .map_err(|e| tool_error(format!("read {}: {e}", input.path)))?
             }
         };
+        if let Some(mime_type) = image_mime_type(&bytes) {
+            if bytes.len() > MAX_IMAGE_BYTES {
+                return Err(tool_error(format!(
+                    "{} is a {mime_type} image larger than the {} MiB read limit",
+                    input.path,
+                    MAX_IMAGE_BYTES / (1024 * 1024)
+                )));
+            }
+
+            let metadata = format!("{} — {mime_type}, {} bytes", input.path, bytes.len());
+            return Ok(CallToolResult::success(vec![
+                ContentBlock::text(metadata),
+                ContentBlock::image(STANDARD.encode(&bytes), mime_type),
+            ]));
+        }
+
         let text = String::from_utf8(bytes)
             .map_err(|_| tool_error(format!("{} is not a UTF-8 text file", input.path)))?;
 
@@ -673,6 +691,20 @@ async fn bounded_tail(path: &Path) -> Result<(String, bool), McpError> {
     Ok((output, true))
 }
 
+fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xff, 0xd8, 0xff]) {
+        Some("image/jpeg")
+    } else if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        Some("image/webp")
+    } else if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        Some("image/gif")
+    } else {
+        None
+    }
+}
+
 fn text_result(text: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![ContentBlock::text(text.into())])
 }
@@ -755,6 +787,64 @@ mod tests {
                 tool.name
             );
         }
+    }
+
+    #[test]
+    fn detects_supported_image_formats_by_content() {
+        assert_eq!(image_mime_type(b"\x89PNG\r\n\x1a\nrest"), Some("image/png"));
+        assert_eq!(image_mime_type(b"\xff\xd8\xffrest"), Some("image/jpeg"));
+        assert_eq!(
+            image_mime_type(b"RIFF\x00\x00\x00\x00WEBPrest"),
+            Some("image/webp")
+        );
+        assert_eq!(image_mime_type(b"GIF89arest"), Some("image/gif"));
+        assert_eq!(image_mime_type(b"plain text"), None);
+    }
+
+    #[tokio::test]
+    async fn read_returns_native_mcp_image_content() {
+        let workspace = std::env::temp_dir().join(format!("pc-image-test-{}", Uuid::new_v4()));
+        tokio::fs::create_dir_all(&workspace)
+            .await
+            .expect("create test workspace");
+        let image_bytes = b"\x89PNG\r\n\x1a\npc-test-image";
+        tokio::fs::write(workspace.join("test.png"), image_bytes)
+            .await
+            .expect("write test image");
+
+        let state = Arc::new(AppState {
+            public_url: None,
+            oauth_password: None,
+            workspace: workspace.clone(),
+            security: crate::config::SecurityConfig::default(),
+            sandbox: None,
+            allowed_redirect_hosts: Vec::new(),
+            production: false,
+            processes: ProcessRegistry::default(),
+        });
+        let mcp = PcMcp::new(state);
+        let result = mcp
+            .read(Parameters(ReadParams {
+                path: "test.png".into(),
+                offset: None,
+                limit: None,
+            }))
+            .await
+            .expect("read image");
+
+        assert_eq!(result.content.len(), 2);
+        assert!(
+            result.content[0]
+                .as_text()
+                .is_some_and(|text| text.text.contains("image/png"))
+        );
+        let image = result.content[1]
+            .as_image()
+            .expect("second content block must be an image");
+        assert_eq!(image.mime_type, "image/png");
+        assert_eq!(image.data, STANDARD.encode(image_bytes));
+
+        let _ = tokio::fs::remove_dir_all(workspace).await;
     }
 
     #[tokio::test]
