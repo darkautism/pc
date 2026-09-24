@@ -15,11 +15,12 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use clap::{Parser, Subcommand};
+use notify::{RecursiveMode, Watcher};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
 use tower_http::trace::TraceLayer;
-use tracing::info;
+use tracing::{info, warn};
 use url::Url;
 
 mod config;
@@ -232,6 +233,20 @@ async fn async_main() -> anyhow::Result<()> {
         .context("open OAuth database")?,
     );
 
+    if args.allowed_redirect_hosts.is_none() {
+        if let Err(error) = spawn_oauth_redirect_allowlist_watch(
+            home.clone(),
+            oauth_state.clone(),
+            state.production,
+        ) {
+            warn!(%error, "OAuth redirect allowlist hot reload unavailable; startup value remains active");
+        }
+    } else {
+        info!(
+            "OAuth redirect allowlist hot reload disabled because PC_ALLOWED_REDIRECT_HOSTS/--allowed-redirect-hosts overrides config.yaml"
+        );
+    }
+
     let mcp_config = mcp_http_config(state.public_url.as_deref())?;
     let root_mcp_config = mcp_http_config(state.public_url.as_deref())?;
 
@@ -401,6 +416,67 @@ fn normalize_hosts(hosts: Vec<String>) -> Vec<String> {
         .map(|v| v.trim().to_ascii_lowercase())
         .filter(|v| !v.is_empty())
         .collect()
+}
+
+fn spawn_oauth_redirect_allowlist_watch(
+    home: PathBuf,
+    oauth_state: Arc<OAuthState>,
+    production: bool,
+) -> anyhow::Result<()> {
+    let config_path = home.join("config.yaml");
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+    let mut watcher =
+        notify::recommended_watcher(move |result: notify::Result<notify::Event>| match result {
+            Ok(event)
+                if event.paths.iter().any(|path| {
+                    path.file_name().and_then(|name| name.to_str()) == Some("config.yaml")
+                }) =>
+            {
+                let _ = tx.send(());
+            }
+            Ok(_) => {}
+            Err(error) => warn!(%error, "config watcher event failed"),
+        })
+        .context("create config watcher")?;
+    watcher
+        .watch(&home, RecursiveMode::NonRecursive)
+        .with_context(|| format!("watch {}", home.display()))?;
+
+    tokio::spawn(async move {
+        let _watcher = watcher;
+        while rx.recv().await.is_some() {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+            while rx.try_recv().is_ok() {}
+
+            match config::load_existing(&home).await {
+                Ok(config) => {
+                    let allowed_hosts = normalize_hosts(config.allowed_redirect_hosts);
+                    if production && allowed_hosts.is_empty() {
+                        warn!(
+                            path = %config_path.display(),
+                            "refusing to hot-reload an empty OAuth redirect allowlist in production"
+                        );
+                        continue;
+                    }
+                    oauth_state.set_redirect_policy(RedirectPolicy::Restricted {
+                        production,
+                        allowed_hosts: allowed_hosts.clone(),
+                    });
+                    info!(
+                        path = %config_path.display(),
+                        allowed_redirect_hosts = ?allowed_hosts,
+                        "OAuth redirect allowlist reloaded"
+                    );
+                }
+                Err(error) => warn!(
+                    path = %config_path.display(),
+                    %error,
+                    "reload config.yaml failed; keeping previous OAuth redirect allowlist"
+                ),
+            }
+        }
+    });
+    Ok(())
 }
 
 fn validate_public_url(raw: &str) -> anyhow::Result<()> {

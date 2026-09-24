@@ -55,6 +55,8 @@ security:
 
 After writing that file, starting `pc` is enough. On Windows, native paths such as `workspace: E:\project` are accepted directly; the common `workspace: "E:\project"` form is also tolerated. The SQLite database and sandbox state are stored beside the config using native filesystem paths, so Windows drive letters are never forced through a SQLite URL.
 
+`allowed_redirect_hosts` is watched and hot-reloaded when `config.yaml` changes, so redirect allowlist edits do not require restarting pc. If `PC_ALLOWED_REDIRECT_HOSTS` or `--allowed-redirect-hosts` is set, that explicit override remains authoritative and hot reload is disabled for this field.
+
 Environment variables can override the corresponding config values for that process:
 
 | config | environment |

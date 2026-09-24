@@ -88,6 +88,14 @@ pub fn default_home() -> anyhow::Result<PathBuf> {
     ))
 }
 
+pub async fn load_existing(home: &Path) -> anyhow::Result<PcConfig> {
+    let path = home.join("config.yaml");
+    let text = tokio::fs::read_to_string(&path)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    parse_config(&text, &path)
+}
+
 pub async fn load_or_create(home: &Path, overrides: ConfigOverrides) -> anyhow::Result<PcConfig> {
     tokio::fs::create_dir_all(home)
         .await
