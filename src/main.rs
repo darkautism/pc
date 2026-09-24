@@ -1,4 +1,9 @@
-use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Instant};
+use std::{
+    net::SocketAddr,
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, ensure};
 use axum::{
@@ -59,6 +64,9 @@ struct Args {
     #[arg(long, env = "PC_ALLOWED_REDIRECT_HOSTS")]
     allowed_redirect_hosts: Option<String>,
 
+    #[arg(long, env = "PC_TASK_LOG_RETENTION_SECS")]
+    task_log_retention_secs: Option<u64>,
+
     #[arg(
         long,
         env = "PC_PRODUCTION",
@@ -85,6 +93,7 @@ pub(crate) struct AppState {
     pub sandbox: Option<Arc<SafeSandbox>>,
     pub allowed_redirect_hosts: Vec<String>,
     pub production: bool,
+    pub task_log_retention: Duration,
     pub processes: ProcessRegistry,
 }
 
@@ -123,6 +132,7 @@ async fn async_main() -> anyhow::Result<()> {
         public_url,
         production,
         allowed_redirect_hosts,
+        task_log_retention_secs,
         security,
     } = config::load_or_create(
         &home,
@@ -132,6 +142,7 @@ async fn async_main() -> anyhow::Result<()> {
             public_url: args.public_url.clone(),
             production: args.production,
             allowed_redirect_hosts: args.allowed_redirect_hosts.as_deref().map(parse_hosts),
+            task_log_retention_secs: args.task_log_retention_secs,
             security_mode: args.security_mode,
             security_network: args.security_network,
             security_protect_secrets: args.security_protect_secrets,
@@ -195,8 +206,10 @@ async fn async_main() -> anyhow::Result<()> {
         sandbox,
         allowed_redirect_hosts,
         production,
+        task_log_retention: Duration::from_secs(task_log_retention_secs),
         processes: ProcessRegistry::default(),
     });
+    tools::spawn_task_log_cleanup(state.clone());
 
     let oauth_state = Arc::new(
         OAuthState::open(
@@ -259,6 +272,7 @@ async fn async_main() -> anyhow::Result<()> {
         listen = %args.listen,
         workspace = %state.workspace.display(),
         security_mode = ?state.security.mode,
+        task_log_retention_secs = state.task_log_retention.as_secs(),
         version = env!("CARGO_PKG_VERSION"),
         git_sha = env!("PC_BUILD_GIT_SHA"),
         "pc listening"
@@ -474,6 +488,7 @@ mod tests {
             sandbox: None,
             allowed_redirect_hosts: Vec::new(),
             production: false,
+            task_log_retention: Duration::from_secs(2 * 60 * 60),
             processes: ProcessRegistry::default(),
         });
         let service_state = state.clone();

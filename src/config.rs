@@ -13,6 +13,7 @@ pub struct PcConfig {
     pub public_url: Option<String>,
     pub production: bool,
     pub allowed_redirect_hosts: Vec<String>,
+    pub task_log_retention_secs: u64,
     pub security: SecurityConfig,
 }
 
@@ -24,6 +25,7 @@ impl Default for PcConfig {
             public_url: None,
             production: false,
             allowed_redirect_hosts: Vec::new(),
+            task_log_retention_secs: 2 * 60 * 60,
             security: SecurityConfig::default(),
         }
     }
@@ -68,6 +70,7 @@ pub struct ConfigOverrides {
     pub public_url: Option<String>,
     pub production: Option<bool>,
     pub allowed_redirect_hosts: Option<Vec<String>>,
+    pub task_log_retention_secs: Option<u64>,
     pub security_mode: Option<SecurityMode>,
     pub security_network: Option<bool>,
     pub security_protect_secrets: Option<bool>,
@@ -202,6 +205,12 @@ mod tests {
     }
 
     #[test]
+    fn old_config_defaults_task_log_retention_to_two_hours() {
+        let config: PcConfig = serde_yaml::from_str("workspace: /tmp\n").expect("parse config");
+        assert_eq!(config.task_log_retention_secs, 2 * 60 * 60);
+    }
+
+    #[test]
     fn generated_oauth_password_is_self_contained() {
         let password = generate_oauth_password();
         assert_eq!(password.len(), 64);
@@ -248,6 +257,9 @@ fn apply_overrides(config: &mut PcConfig, overrides: &ConfigOverrides) {
     }
     if let Some(allowed_redirect_hosts) = overrides.allowed_redirect_hosts.as_ref() {
         config.allowed_redirect_hosts = allowed_redirect_hosts.clone();
+    }
+    if let Some(task_log_retention_secs) = overrides.task_log_retention_secs {
+        config.task_log_retention_secs = task_log_retention_secs;
     }
     if let Some(mode) = overrides.security_mode {
         config.security.mode = mode;

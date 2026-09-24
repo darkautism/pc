@@ -6,6 +6,7 @@ PC_WORKSPACE="${PC_WORKSPACE:-/workspace}"
 PC_SECURITY_MODE="${PC_SECURITY_MODE:-full}"
 PC_SECURITY_NETWORK="${PC_SECURITY_NETWORK:-true}"
 PC_SECURITY_PROTECT_SECRETS="${PC_SECURITY_PROTECT_SECRETS:-true}"
+PC_TASK_LOG_RETENTION_SECS="${PC_TASK_LOG_RETENTION_SECS:-7200}"
 PC_PRODUCTION="${PC_PRODUCTION:-false}"
 PC_PUBLIC_URL="${PC_PUBLIC_URL:-}"
 PC_ALLOWED_REDIRECT_HOSTS="${PC_ALLOWED_REDIRECT_HOSTS:-}"
@@ -23,6 +24,11 @@ esac
 case "$PC_SECURITY_PROTECT_SECRETS" in
   true|false) ;;
   *) echo "PC_SECURITY_PROTECT_SECRETS must be true or false" >&2; exit 2 ;;
+esac
+
+case "$PC_TASK_LOG_RETENTION_SECS" in
+  ''|*[!0-9]*) echo "PC_TASK_LOG_RETENTION_SECS must be a non-negative integer" >&2; exit 2 ;;
+  *) ;;
 esac
 
 case "$PC_PRODUCTION" in
@@ -66,6 +72,7 @@ tmp="$config.tmp.$$"
   fi
 
   printf 'production: %s\n' "$PC_PRODUCTION"
+  printf 'task_log_retention_secs: %s\n' "$PC_TASK_LOG_RETENTION_SECS"
 
   if [ -n "$PC_ALLOWED_REDIRECT_HOSTS" ]; then
     printf 'allowed_redirect_hosts:\n'

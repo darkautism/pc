@@ -23,6 +23,8 @@ If the command is still running after 10 seconds, pc does **not** kill it. It re
 
 `bash` is a non-interactive shell tool: it uses Bash on Unix and `cmd.exe` on Windows. Pipes and redirection follow the native shell; PTY/curses programs and interactive REPLs are not supported.
 
+Task logs are cleaned every 60 seconds. Logs older than `task_log_retention_secs` are removed; the default is `7200` (2 hours). Running-command logs are protected, and the existing 256 MiB task-log directory quota is still enforced.
+
 ## Native / manual install
 
 A normal installation stores its config here:
@@ -44,6 +46,7 @@ public_url: "https://pc.example.com"
 production: true
 allowed_redirect_hosts:
   - "client.example.com"
+task_log_retention_secs: 7200
 security:
   mode: safe
   network: true
@@ -61,6 +64,7 @@ Environment variables can override the corresponding config values for that proc
 | `public_url` | `PC_PUBLIC_URL` |
 | `production` | `PC_PRODUCTION` |
 | `allowed_redirect_hosts` | `PC_ALLOWED_REDIRECT_HOSTS` (comma-separated) |
+| `task_log_retention_secs` | `PC_TASK_LOG_RETENTION_SECS` |
 | `security.mode` | `PC_SECURITY_MODE` |
 | `security.network` | `PC_SECURITY_NETWORK` |
 | `security.protect_secrets` | `PC_SECURITY_PROTECT_SECRETS` |
@@ -126,6 +130,7 @@ PC_WORKSPACE=/workspace
 PC_SECURITY_MODE=full
 PC_SECURITY_NETWORK=true
 PC_SECURITY_PROTECT_SECRETS=true
+PC_TASK_LOG_RETENTION_SECS=7200
 PC_PRODUCTION=false
 ```
 
@@ -150,6 +155,7 @@ docker run --rm -p 8686:8686 \
   -e PC_SECURITY_MODE=full \
   -e PC_SECURITY_NETWORK=true \
   -e PC_SECURITY_PROTECT_SECRETS=true \
+  -e PC_TASK_LOG_RETENTION_SECS=7200 \
   -e PC_PUBLIC_URL='https://pc.example.com' \
   -e PC_PRODUCTION=true \
   -e PC_ALLOWED_REDIRECT_HOSTS='client.example.com' \

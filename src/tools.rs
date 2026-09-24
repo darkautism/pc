@@ -28,6 +28,7 @@ use tokio::{
     io::{AsyncReadExt, AsyncSeekExt},
     sync::RwLock,
 };
+use tracing::warn;
 use uuid::Uuid;
 
 use crate::{AppState, config::SecurityMode};
@@ -39,7 +40,7 @@ const IMAGE_PREVIEW_JPEG_QUALITY: u8 = 85;
 const MAX_OUTPUT_LINES: usize = 2000;
 const MAX_TAIL_READ_BYTES: u64 = 128 * 1024;
 const SYNC_WAIT: Duration = Duration::from_secs(2);
-const LOG_RETENTION: Duration = Duration::from_secs(24 * 60 * 60);
+const TASK_LOG_CLEANUP_INTERVAL: Duration = Duration::from_secs(60);
 const MAX_LOG_DIR_BYTES: u64 = 256 * 1024 * 1024;
 const PC_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
     ProtocolVersion::V_2026_07_28,
@@ -52,6 +53,33 @@ const PC_PROTOCOL_VERSIONS: &[ProtocolVersion] = &[
 #[derive(Clone, Default)]
 pub struct ProcessRegistry {
     inner: Arc<RwLock<HashMap<u32, Arc<ProcessEntry>>>>,
+}
+
+pub(crate) fn spawn_task_log_cleanup(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        let log_dir = task_log_dir(&state);
+        if let Err(error) = tokio::fs::create_dir_all(&log_dir).await {
+            warn!(path = %log_dir.display(), %error, "create task log directory for cleanup failed");
+            return;
+        }
+
+        loop {
+            if let Err(error) =
+                cleanup_task_logs(&log_dir, &state.processes, state.task_log_retention).await
+            {
+                warn!(%error, "periodic task log cleanup failed");
+            }
+            tokio::time::sleep(TASK_LOG_CLEANUP_INTERVAL).await;
+        }
+    });
+}
+
+fn task_log_dir(state: &AppState) -> PathBuf {
+    if let Some(sandbox) = state.sandbox.as_ref() {
+        sandbox.temp_dir().join("pc").join("tasks")
+    } else {
+        std::env::temp_dir().join("pc").join("tasks")
+    }
 }
 
 struct ProcessEntry {
@@ -488,17 +516,17 @@ impl PcMcp {
     }
 
     async fn start_command(&self, command: String) -> Result<CallToolResult, McpError> {
-        let (log_dir, visible_log_dir) = if let Some(sandbox) = self.state.sandbox.as_ref() {
-            let dir = sandbox.temp_dir().join("pc").join("tasks");
-            (dir.clone(), dir)
-        } else {
-            let dir = std::env::temp_dir().join("pc").join("tasks");
-            (dir.clone(), dir)
-        };
+        let log_dir = task_log_dir(&self.state);
+        let visible_log_dir = log_dir.clone();
         tokio::fs::create_dir_all(&log_dir)
             .await
             .map_err(|e| tool_error(format!("create command log directory: {e}")))?;
-        cleanup_task_logs(&log_dir, &self.state.processes).await?;
+        cleanup_task_logs(
+            &log_dir,
+            &self.state.processes,
+            self.state.task_log_retention,
+        )
+        .await?;
         let file_name = format!("{}.log", Uuid::new_v4());
         let log_path = log_dir.join(&file_name);
         let visible_log_path = visible_log_dir
@@ -746,8 +774,12 @@ fn resolve_path(workspace: &Path, raw: &str) -> PathBuf {
     }
 }
 
-async fn cleanup_task_logs(log_dir: &Path, processes: &ProcessRegistry) -> Result<(), McpError> {
-    cleanup_task_logs_with_limits(log_dir, processes, LOG_RETENTION, MAX_LOG_DIR_BYTES).await
+async fn cleanup_task_logs(
+    log_dir: &Path,
+    processes: &ProcessRegistry,
+    retention: Duration,
+) -> Result<(), McpError> {
+    cleanup_task_logs_with_limits(log_dir, processes, retention, MAX_LOG_DIR_BYTES).await
 }
 
 async fn cleanup_task_logs_with_limits(
@@ -1143,6 +1175,7 @@ mod tests {
             sandbox: None,
             allowed_redirect_hosts: Vec::new(),
             production: false,
+            task_log_retention: Duration::from_secs(2 * 60 * 60),
             processes: ProcessRegistry::default(),
         })
     }
@@ -1411,6 +1444,7 @@ mod tests {
             sandbox: None,
             allowed_redirect_hosts: Vec::new(),
             production: false,
+            task_log_retention: Duration::from_secs(2 * 60 * 60),
             processes: ProcessRegistry::default(),
         });
         let mcp = PcMcp::new(state.clone());
