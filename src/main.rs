@@ -15,7 +15,7 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use clap::{Parser, Subcommand};
-use notify::{RecursiveMode, Watcher};
+use notify::{EventKind, RecursiveMode, Watcher};
 use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
 };
@@ -418,6 +418,13 @@ fn normalize_hosts(hosts: Vec<String>) -> Vec<String> {
         .collect()
 }
 
+fn config_event_requires_reload(kind: &EventKind) -> bool {
+    matches!(
+        kind,
+        EventKind::Create(_) | EventKind::Modify(_) | EventKind::Remove(_)
+    )
+}
+
 fn spawn_oauth_redirect_allowlist_watch(
     home: PathBuf,
     oauth_state: Arc<OAuthState>,
@@ -428,9 +435,10 @@ fn spawn_oauth_redirect_allowlist_watch(
     let mut watcher =
         notify::recommended_watcher(move |result: notify::Result<notify::Event>| match result {
             Ok(event)
-                if event.paths.iter().any(|path| {
-                    path.file_name().and_then(|name| name.to_str()) == Some("config.yaml")
-                }) =>
+                if config_event_requires_reload(&event.kind)
+                    && event.paths.iter().any(|path| {
+                        path.file_name().and_then(|name| name.to_str()) == Some("config.yaml")
+                    }) =>
             {
                 let _ = tx.send(());
             }
@@ -533,6 +541,18 @@ fn mcp_http_config(public_url: Option<&str>) -> anyhow::Result<StreamableHttpSer
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn config_watcher_ignores_read_access_events() {
+        use notify::event::{AccessKind, ModifyKind};
+
+        assert!(!config_event_requires_reload(&EventKind::Access(
+            AccessKind::Any
+        )));
+        assert!(config_event_requires_reload(&EventKind::Modify(
+            ModifyKind::Any
+        )));
+    }
 
     #[test]
     fn mcp_transport_uses_modern_stateless_discovery() {
